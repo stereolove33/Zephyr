@@ -10,10 +10,6 @@ A Windows desktop app for selecting official and custom League of Legends skins.
 
 [Download](https://github.com/stereolove33/Zephyr/releases) the Windows installer. Source code archives and any published verification files are available alongside each release.
 
-## Status
-
-Experimental derivative project. The user reported successful local testing of the app and rebuilt menu. Other systems and future game versions have not been verified.
-
 ## Build
 
 Install Git, Node.js, Rust with the MSVC target, and Visual Studio Build Tools 2022 with Desktop development with C++, MSVC v143 and a Windows SDK. Open the x64 Native Tools Command Prompt.
