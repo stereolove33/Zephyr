@@ -1,0 +1,152 @@
+import { ArrowClockwiseIcon, ClipboardTextIcon, StethoscopeIcon } from "@phosphor-icons/react";
+import { getRouteApi, useNavigate } from "@tanstack/react-router";
+
+import { AlertBox, Button, Separator, Spinner, Tabs, useToast } from "@/components";
+import { errorSummary } from "@/i18n";
+import type { DiagnosticReport } from "@/lib/tauri";
+import { DiagnosticsReportView, GamesTab, useDiagnostics } from "@/modules/diagnostics";
+import { SuspectModAction } from "@/modules/library";
+
+import type { DiagnosticsTab } from "../routes/diagnostics";
+
+const routeApi = getRouteApi("/diagnostics");
+
+function formatGeneratedAt(iso: string) {
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
+function reportToText(report: DiagnosticReport): string {
+  const lines: string[] = [];
+  lines.push(`# LTK Manager diagnostics`);
+  lines.push(`Generated: ${report.generatedAt}`);
+  lines.push(`App version: ${report.appVersion}`);
+  lines.push("");
+  for (const c of report.checks) {
+    lines.push(`[${c.severity.toUpperCase()}] ${c.label} — ${c.summary}`);
+    for (const d of c.details) {
+      lines.push(`    ${d.key}: ${d.value}`);
+    }
+    if (c.suggestion) {
+      lines.push(`    note: ${c.suggestion}`);
+    }
+    if (c.fixCommand) {
+      for (const cmdLine of c.fixCommand.split("\n")) {
+        lines.push(`    > ${cmdLine}`);
+      }
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+export function Diagnostics() {
+  const { tab } = routeApi.useSearch();
+  const navigate = useNavigate({ from: "/diagnostics" });
+  const value: DiagnosticsTab = tab ?? "games";
+
+  function setTab(next: DiagnosticsTab) {
+    navigate({ search: (prev) => ({ ...prev, tab: next }), replace: true });
+  }
+
+  return (
+    <div data-ui="Diagnostics" className="flex h-full flex-col">
+      <Tabs.Root
+        value={value}
+        onValueChange={(next) => setTab(next as DiagnosticsTab)}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        {/* The tab strip is the page's only chrome, so the title shares its row
+            rather than standing over it in a band of its own. */}
+        <header className="flex shrink-0 items-center border-b border-surface-700/50 px-4 select-none">
+          <h1 className="flex shrink-0 items-center gap-2 text-sm font-semibold text-surface-200">
+            <StethoscopeIcon className="h-4 w-4 text-accent-400" />
+            Diagnostics
+          </h1>
+          <Separator orientation="vertical" className="mx-2 h-4" />
+          <Tabs.List className="border-b-0">
+            <Tabs.Tab value="games">Games</Tabs.Tab>
+            <Tabs.Tab value="system">System</Tabs.Tab>
+          </Tabs.List>
+        </header>
+
+        <Tabs.Panel value="games" className="mt-0 flex min-h-0 flex-1 flex-col">
+          <GamesTab modAction={(modId) => <SuspectModAction modId={modId} />} />
+        </Tabs.Panel>
+        <Tabs.Panel value="system" className="mt-0 min-h-0 flex-1 overflow-y-auto">
+          <SystemTab />
+        </Tabs.Panel>
+      </Tabs.Root>
+    </div>
+  );
+}
+
+function SystemTab() {
+  const diagnostics = useDiagnostics();
+  const toast = useToast();
+  const report = diagnostics.data;
+
+  function copyReport() {
+    if (!report) return;
+    navigator.clipboard
+      .writeText(reportToText(report))
+      .then(() => toast.success("Copied", "Diagnostic report copied to clipboard"))
+      .catch(() => toast.error("Copy failed", "Could not access the clipboard"));
+  }
+
+  return (
+    <div data-ui="SystemTab" className="mx-auto w-full max-w-5xl space-y-6 p-6">
+      <header className="flex items-start justify-between gap-4 select-none">
+        <div>
+          <p className="text-sm text-surface-400">
+            Checks the most common reasons the patcher fails to load mods. Re-run after changing
+            settings or a Windows update. All checks are read-only — fixes are shown as commands you
+            can copy and run in an elevated terminal.
+          </p>
+          {report && (
+            <p className="mt-1 text-xs text-surface-500">
+              Last run: {formatGeneratedAt(report.generatedAt)} · LTK Manager v{report.appVersion}
+            </p>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={copyReport}
+            disabled={!report}
+            left={<ClipboardTextIcon weight="bold" className="h-4 w-4" />}
+          >
+            Copy report
+          </Button>
+          <Button
+            variant="filled"
+            size="sm"
+            onClick={() => diagnostics.refetch()}
+            loading={diagnostics.isFetching}
+            left={<ArrowClockwiseIcon weight="bold" className="h-4 w-4" />}
+          >
+            {diagnostics.isFetching ? "Running…" : "Re-run"}
+          </Button>
+        </div>
+      </header>
+
+      {diagnostics.isError && (
+        <AlertBox variant="error" title="Diagnostics failed to run">
+          {diagnostics.error ? errorSummary(diagnostics.error) : "Unknown error"}
+        </AlertBox>
+      )}
+
+      {!report && diagnostics.isFetching && (
+        <div className="flex items-center justify-center rounded-xl border border-surface-700/50 bg-surface-900/50 py-16">
+          <Spinner size="lg" />
+        </div>
+      )}
+
+      {report && <DiagnosticsReportView report={report} />}
+    </div>
+  );
+}

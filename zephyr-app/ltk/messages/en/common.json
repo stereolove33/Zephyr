@@ -1,0 +1,48 @@
+{
+  "$schema": "https://inlang.com/schema/inlang-message-format",
+  "common_action_failed_title": "Something went wrong",
+  "common_breadcrumb_overflow_action": "Show the places above",
+  "common_cancel_action": "Cancel",
+  "common_chip_remove_action": "Remove {label}",
+  "common_close_action": "Close",
+  "common_color_picker_hex_field_label": "{label} hex",
+  "common_color_picker_hex_label": "Hex",
+  "common_color_picker_hue_label": "Hue",
+  "common_color_picker_shade_label": "Saturation {saturation}%, brightness {brightness}%",
+  "common_crash_description": "This screen stopped working. Reloading usually fixes it, and nothing you have installed is affected.",
+  "common_crash_reload_action": "Reload",
+  "common_crash_report_action": "Report a bug",
+  "common_crash_title": "The manager hit a problem",
+  "common_error_code_label": "Error code: {code}",
+  "common_filter_champion_empty": "No champions found",
+  "common_filter_champion_search_placeholder": "Search champions",
+  "common_filter_clear_action": "Clear filters",
+  "common_filter_clear_all_action": "Clear all",
+  "common_filter_maps_label": "Maps",
+  "common_filter_popup_label": "Sort and filter",
+  "common_filter_tags_label": "Tags",
+  "common_health_broken_label": "{count} broken",
+  "common_health_flagged_label": "{count} flagged",
+  "common_health_repairs_label": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} repair",
+        "countPlural=other": "{count} repairs"
+      }
+    }
+  ],
+  "common_number_decrease_action": "Decrease value",
+  "common_number_increase_action": "Increase value",
+  "common_number_step_hint": "Up/Down to step. Ctrl/Cmd for fine steps, Shift for coarse steps. Enter to apply, Escape to cancel.",
+  "common_path_open_action": "Open in file manager",
+  "common_retry_action": "Retry",
+  "common_save_action": "Save",
+  "common_sort_name_asc_label": "A–Z",
+  "common_sort_name_desc_label": "Z–A",
+  "common_sort_newest_label": "Newest",
+  "common_sort_oldest_label": "Oldest",
+  "common_sort_section_label": "Sort by",
+  "common_unknown_error_label": "Unknown error"
+}

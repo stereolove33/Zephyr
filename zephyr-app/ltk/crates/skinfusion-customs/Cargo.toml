@@ -1,0 +1,16 @@
+[package]
+name = "skinfusion-customs"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+ltk-manager-core = { workspace = true }
+fs-err = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+camino = { workspace = true }
+ltk_overlay = { workspace = true }
+sha2 = { workspace = true }

@@ -1,0 +1,234 @@
+import type { RootState } from "@react-three/fiber";
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+
+import { SceneCamera } from "../../camera/components/SceneCamera";
+import { CameraPresetContext } from "../../camera/state/presetContext";
+import { CAMERA, type CameraPreset } from "../../camera/utils/cameraPresets";
+import { AXIS_SIGN } from "../../shared/utils/space";
+import { useSceneColors } from "../hooks/sceneColors";
+import { type BackdropSource, useMapBackdrop } from "../hooks/useMapBackdrop";
+import { type CharacterLight, CharacterLightContext } from "../state/characterLightContext";
+import { ViewModeContext } from "../state/viewModeContext";
+import {
+  type AmbientOcclusion,
+  drawsAmbientOcclusion,
+  NO_AMBIENT_OCCLUSION,
+} from "../utils/ambientOcclusion";
+import { type AntiAliasing, DEFAULT_ANTI_ALIASING } from "../utils/antiAliasing";
+import { drawsPostEffects, NO_POST_EFFECTS, type PostEffects } from "../utils/postEffects";
+import type { RendererUse } from "../utils/sharedRenderer";
+import { DEFAULT_SUN, type SunOverride, withSunOverride } from "../utils/sunLight";
+import { edgesOf, type ViewMode } from "../utils/viewMode";
+import { OUTPUT_COLOR_SPACE, TONE_MAPPING } from "../utils/world";
+import { AntiAliasingPass } from "./AntiAliasingPass";
+import { Backdrop } from "./Backdrop";
+import { HostCanvas, useCanvasHost } from "./HostCanvas";
+import { PostEffectsPass } from "./PostEffectsPass";
+import { Sky } from "./Sky";
+import { Stage } from "./Stage";
+import { Sun } from "./Sun";
+
+export interface ViewportProps {
+  /** Whether this surface spends frames, including while its canvas remains mounted. */
+  readonly active?: boolean;
+  /**
+   * Which renderer the scene draws with, its own unless said otherwise.
+   *
+   * A shared one falls back to its own where another viewport drawing with it is on
+   * screen at the same time, which remounts the scene once.
+   */
+  readonly renderer?: RendererUse;
+  /** A fixed pixel ratio for small preview surfaces. */
+  readonly dpr?: number;
+  /** The orientation control is drawn over the scene. */
+  readonly gizmo?: boolean;
+  /** The ground and its grid are drawn. */
+  readonly stage: boolean;
+  /** The ground wears the midlane's texture rather than the flat token fill. */
+  readonly textured: boolean;
+  /**
+   * The game's own map drawn behind the subject, and null for the flat stage.
+   *
+   * A backdrop replaces the stage rather than standing on it, so neither the ground plane
+   * nor its grid is drawn while one is up.
+   */
+  readonly backdrop?: BackdropSource | null;
+  /** The visibility flags the backdrop draws, as a mask, and the map's own opening ones absent. */
+  readonly backdropFlags?: number;
+  /** The sky cube map is drawn behind the backdrop, and the flat colour when off. */
+  readonly backdropSky?: boolean;
+  /** The sun control's fields over the backdrop's own sun, or `DEFAULT_SUN` without one. */
+  readonly sun?: SunOverride | null;
+  /** The scene's post effects, and the backdrop's own or none when absent. */
+  readonly postEffects?: PostEffects | null;
+  /** The scene's ambient occlusion, and the backdrop's own or none when absent. */
+  readonly ambientOcclusion?: AmbientOcclusion | null;
+  /** How the finished frame's edges are smoothed. */
+  readonly antiAliasing?: AntiAliasing;
+  /** Which camera the scene draws through, "The viewer" in docs/ux/BIN_EDITOR.md. */
+  readonly camera: CameraPreset;
+  /** The kind of viewport whose last camera pose this one opens at, and records, if any. */
+  readonly cameraMemory?: string;
+  /** The scene colour the canvas clears to: the pane's ground, or the raised card ground. */
+  readonly clearColor?: "backdrop" | "ground";
+  /** How the backdrop and every character draw their meshes. */
+  readonly viewMode?: ViewMode;
+  /** The triangle edges draw over a lit or untextured scene. */
+  readonly wireOverlay?: boolean;
+  /** The reader stood the camera on `preset`: Orbit by a drag, an axis view by the gizmo. */
+  readonly onCameraStand?: (preset: CameraPreset) => void;
+  /**
+   * Where a subject stands on the backdrop before anyone moves it, in the scene's space.
+   *
+   * Reported rather than applied, because the viewport draws the map and the scene owns
+   * what stands on it. Null while there is no backdrop.
+   */
+  readonly onBackdropOrigin?: (origin: readonly [number, number, number] | null) => void;
+  /** What the preview draws in the scene, which must include the `Passes` owning the loop. */
+  readonly children: ReactNode;
+}
+
+/**
+ * A scene in the engine's frame: the camera and its orbit, the colour space and the stage.
+ *
+ * What a preview draws is its children, so a particle system, a character, or a character
+ * wearing its effects stand on the same ground under the same camera (ADR-0035). The
+ * gizmo draws as a HUD over the frame, so a child of the canvas has to own the render
+ * loop, which `Passes` does.
+ */
+export function Viewport({
+  active = true,
+  renderer = "own",
+  dpr,
+  gizmo = true,
+  stage,
+  textured,
+  backdrop = null,
+  backdropFlags,
+  backdropSky = true,
+  sun = null,
+  postEffects = null,
+  ambientOcclusion = null,
+  antiAliasing = DEFAULT_ANTI_ALIASING,
+  camera,
+  cameraMemory,
+  clearColor = "backdrop",
+  viewMode = "lit",
+  wireOverlay = false,
+  onCameraStand,
+  onBackdropOrigin,
+  children,
+}: ViewportProps) {
+  const colors = useSceneColors();
+  const map = useMapBackdrop(backdrop);
+  const light = useMemo(() => withSunOverride(map.sun ?? DEFAULT_SUN, sun), [map.sun, sun]);
+  const grid = map.geometry === null ? null : map.lightGrid;
+  const characterLight = useMemo<CharacterLight>(() => ({ grid, sun: light }), [grid, light]);
+  const edges = edgesOf(viewMode, wireOverlay);
+  const view = useMemo(
+    () => ({ mode: viewMode, edges, edgeColour: colors.wire }),
+    [viewMode, edges, colors],
+  );
+  const host = useCanvasHost(active, renderer === "shared");
+  const { running } = host;
+  const [started, setStarted] = useState(false);
+  const root = useRef<RootState | null>(null);
+  const runningNow = useRef(running);
+  // Canvas skips configuration at zero size, so hidden panes stop the root directly.
+  useLayoutEffect(() => {
+    runningNow.current = running;
+    if (root.current !== null) setRunning(root.current, running);
+  }, [running]);
+  useEffect(() => {
+    if (running) setStarted(true);
+  }, [running]);
+
+  const effects = postEffects ?? map.postEffects ?? NO_POST_EFFECTS;
+  const occlusion = ambientOcclusion ?? map.ambientOcclusion ?? NO_AMBIENT_OCCLUSION;
+
+  const origin = map.origin;
+  useEffect(() => {
+    /* Mirrored the way the backdrop's own group is, so the point lands where the map
+       drew it rather than across the scene from it. */
+    onBackdropOrigin?.(
+      origin === null
+        ? null
+        : [origin[0] * AXIS_SIGN[0], origin[1] * AXIS_SIGN[1], origin[2] * AXIS_SIGN[2]],
+    );
+  }, [origin, onBackdropOrigin]);
+
+  return (
+    <div
+      ref={host.hold}
+      /* ThreeJS pins the canvas at the size last measured, a frame behind the box. */
+      className="relative size-full [&_canvas]:size-full!"
+    >
+      {(started || running) && (
+        <HostCanvas
+          host={host}
+          dpr={dpr}
+          frameloop={running ? "always" : "never"}
+          camera={{
+            position: [...CAMERA.position],
+            near: CAMERA.near,
+            far: CAMERA.far,
+            fov: CAMERA.fov,
+          }}
+          onCreated={(state) => {
+            root.current = state;
+            setRunning(state, runningNow.current);
+            const { gl } = state;
+            gl.outputColorSpace = OUTPUT_COLOR_SPACE;
+            gl.toneMapping = TONE_MAPPING;
+          }}
+        >
+          <color attach="background" args={[colors[clearColor]]} />
+          <SceneCamera
+            preset={camera}
+            colors={colors}
+            onStand={onCameraStand}
+            gizmo={gizmo}
+            memory={cameraMemory}
+          />
+          <Sun light={light} />
+          <Stage colors={colors} shown={stage && map.geometry === null} textured={textured} />
+          {map.geometry !== null && (
+            <>
+              {backdropSky && <Sky />}
+              <Backdrop
+                map={map.geometry}
+                materials={map.materials}
+                textures={map.textures}
+                programs={map.programs}
+                programTextures={map.programTextures}
+                lightmaps={map.lightmaps}
+                light={light}
+                flags={backdropFlags ?? map.opening}
+                viewMode={viewMode}
+                edges={edges}
+                edgeColour={colors.wire}
+              />
+            </>
+          )}
+          <CharacterLightContext value={characterLight}>
+            <CameraPresetContext value={camera}>
+              <ViewModeContext value={view}>{children}</ViewModeContext>
+            </CameraPresetContext>
+          </CharacterLightContext>
+          {(drawsPostEffects(effects) || drawsAmbientOcclusion(occlusion)) && (
+            <PostEffectsPass effects={effects} occlusion={occlusion} />
+          )}
+          {antiAliasing !== "off" && <AntiAliasingPass mode={antiAliasing} />}
+        </HostCanvas>
+      )}
+    </div>
+  );
+}
+
+function setRunning(root: RootState, running: boolean): void {
+  const state = root.get();
+  const mode = running ? "always" : "never";
+  if (state.frameloop !== mode) state.setFrameloop(mode);
+  // A queued automatic frame in manual mode treats the RAF timestamp as seconds.
+  if (!running) state.internal.frames = 0;
+}

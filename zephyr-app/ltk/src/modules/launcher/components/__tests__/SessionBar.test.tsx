@@ -1,0 +1,550 @@
+// @vitest-environment happy-dom
+
+import { act, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+
+import type { Incident, LaunchProgress, OverlayProgress, PatcherPhase } from "@/lib/tauri";
+import { usePatcherStatus } from "@/modules/patcher";
+import { useIncidentLineStore, usePatcherFailureStore, usePlaySessionStore } from "@/stores";
+import { commandNames } from "@/test/commandNames";
+import { mockInvoke, mockListen } from "@/test/mocks/tauri";
+import { renderWithProviders } from "@/test/utils";
+
+import { SessionBar } from "../SessionBar";
+
+const mockNavigate = vi.fn();
+
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  useNavigate: () => mockNavigate,
+}));
+
+/* The bar reaches workshop through a dynamic import, so the stub stands in for
+   the chunk the test would otherwise wait on. */
+vi.mock("@/modules/workshop", () => ({
+  SessionProjectNames: ({ children }: { children: (names: string[]) => React.ReactNode }) =>
+    children(["Star Guardian Ahri"]),
+}));
+
+type Handler = (event: { payload: unknown }) => void;
+
+/** Reports when the patcher status query has actually settled. */
+function PhaseProbe() {
+  const { data, isSuccess } = usePatcherStatus();
+  return <div data-testid={isSuccess ? `phase-${data.phase}` : "phase-pending"}>phase-probe</div>;
+}
+
+const handlers = new Map<string, Handler[]>();
+
+/** Deliver a backend event to whatever the bar subscribed with. */
+async function emit(name: string, payload: unknown) {
+  await act(async () => {
+    for (const handler of handlers.get(name) ?? []) handler({ payload });
+  });
+}
+
+function mockPatcher(phase: PatcherPhase, patcherAvailable = true, leagueRunning = false) {
+  mockInvoke.mockImplementation((cmd: string) => {
+    if (cmd === commandNames.patcher.getPatcherStatus) {
+      return Promise.resolve({
+        ok: true,
+        value: { running: phase !== "idle", phase, session: null },
+      });
+    }
+    if (cmd === commandNames.desktop.getPlatformSupport) {
+      return Promise.resolve({ ok: true, value: { patcherAvailable } });
+    }
+    if (cmd === commandNames.launcher.getLaunchAvailability) {
+      return Promise.resolve({
+        ok: true,
+        value: {
+          canLaunch: true,
+          riotClientPath: null,
+          riotClientRunning: leagueRunning,
+          leagueRunning,
+        },
+      });
+    }
+    return Promise.resolve({ ok: true, value: null });
+  });
+}
+
+/** Renders and waits for the patcher status query to land. */
+async function renderBar(phase: PatcherPhase) {
+  mockPatcher(phase);
+  const view = renderWithProviders(<SessionBar />);
+  if (phase !== "idle") await screen.findByText(/Build overlay|Patcher running/);
+  return view;
+}
+
+/** Renders beside the probe and waits for a settled idle status. */
+async function renderIdleBar() {
+  mockPatcher("idle");
+  const view = renderWithProviders(
+    <>
+      <PhaseProbe />
+      <SessionBar />
+    </>,
+  );
+  await screen.findByTestId("phase-idle");
+  return view;
+}
+
+const waiting: LaunchProgress = {
+  stage: "waitingForClient",
+  waitedSecs: 12,
+  timeoutSecs: 60,
+};
+
+const patching: OverlayProgress = {
+  stage: "patching",
+  currentFile: "Aatrox.wad.client",
+  current: 3,
+  total: 10,
+};
+
+const missingData: Incident = {
+  id: "2026-08-21T21-14-02",
+  startedAt: "2026-08-21T19:14:02Z",
+  endedAt: "2026-08-21T19:14:14Z",
+  origin: { kind: "library" },
+  injected: true,
+  overlay: "live",
+  redirected: ["Aatrox.wad.client"],
+  skipped: [],
+  launch: "match",
+  scan: "eager",
+  scanStatus: null,
+  scanStatusCode: null,
+  scanRejected: 0,
+  shader: null,
+  hostElevated: false,
+  patcher: {},
+  overlayDetail: null,
+  enabledCount: 0,
+  phase: "unknown",
+  failure: null,
+  game: null,
+  ending: { exitReason: "Interrupt", exitCode: -1073741819, crashed: true },
+  verdict: {
+    kind: "missing-data",
+    title: "Missing Game Data",
+    cause: "League failed to read a file.",
+    subject: "Aatrox.wad.client",
+    consequence: "game-stopped",
+    titleOverride: null,
+    hints: [],
+  },
+  evidence: [],
+  suspects: [
+    {
+      modId: "aatrox-justicar",
+      projectPath: null,
+      displayName: "Aatrox Justicar",
+      because: "writes Aatrox.wad.client, which holds the path",
+      reason: "holds-the-path",
+    },
+    {
+      modId: "classic-rift",
+      projectPath: null,
+      displayName: "Classic Rift",
+      because: "writes Map11.wad.client, redirected this game",
+      reason: "redirected",
+    },
+  ],
+  dismissed: false,
+};
+
+describe("SessionBar", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockNavigate.mockReset();
+    handlers.clear();
+    usePlaySessionStore.setState({ step: "idle", session: null });
+    useIncidentLineStore.setState({ incident: null, answeredIncidentId: null });
+    usePatcherFailureStore.setState({ failure: null });
+
+    // `mockListen` is declared with no parameters, so reaching its arguments
+    // needs the same cast the other event tests use.
+    (mockListen as Mock).mockImplementation((name: string, handler: Handler) => {
+      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+      return Promise.resolve(() => {});
+    });
+  });
+
+  /// The bar is permanent app chrome, so "no session" is a state it reports
+  /// rather than a reason to unmount.
+  it("rests on the idle patcher state when there is no session", async () => {
+    // Rendered beside the bar so the assertion runs against a *settled* idle
+    // status rather than a query that simply has not answered yet.
+    await renderIdleBar();
+
+    expect(screen.getByText("Patcher idle")).toBeInTheDocument();
+    // The stepper belongs to an active session, not to the resting state.
+    expect(screen.queryByText("Build overlay")).not.toBeInTheDocument();
+    expect(screen.queryByText("Launch League")).not.toBeInTheDocument();
+  });
+
+  /// "Start the patcher to apply your mods" reads as too late when the client
+  /// is already open, so the idle line names the game the mods will land in.
+  it("says which game the mods reach when League is already running", async () => {
+    mockPatcher("idle", true, true);
+    renderWithProviders(
+      <>
+        <PhaseProbe />
+        <SessionBar />
+      </>,
+    );
+
+    await screen.findByTestId("phase-idle");
+    expect(await screen.findByText(/League is running - start the patcher/i)).toBeInTheDocument();
+  });
+
+  /// On a platform with no patcher, "idle" is permanent and unactionable, so
+  /// the resting line would be a standing piece of noise.
+  it("stays out of the way when the patcher is unavailable", async () => {
+    mockPatcher("idle", false);
+    const { container } = renderWithProviders(
+      <>
+        <PhaseProbe />
+        <SessionBar />
+      </>,
+    );
+
+    await screen.findByTestId("phase-idle");
+    await waitFor(() => {
+      expect(container.textContent).toBe("phase-probe");
+    });
+  });
+
+  it("shows the build stage and its counts while the overlay is building", async () => {
+    await renderBar("building");
+    await emit("overlay-progress", patching);
+
+    expect(screen.getByText("Patching WAD files...")).toBeInTheDocument();
+    expect(screen.getByText("3 / 10")).toBeInTheDocument();
+    expect(screen.getByText("Aatrox.wad.client")).toBeInTheDocument();
+  });
+
+  /// A patcher started on its own - Ctrl+P, or the always-start setting - is
+  /// not going to launch anything, so offering the step would be a lie.
+  it("omits the launch step when no launch was asked for", async () => {
+    await renderBar("building");
+
+    expect(screen.getByText("Build overlay")).toBeInTheDocument();
+    expect(screen.queryByText("Launch League")).not.toBeInTheDocument();
+  });
+
+  /// The reason this whole bar exists: the client can take most of a minute to
+  /// come up, and the wait has to say what it is waiting for.
+  it("explains the wait for the Riot Client, with the seconds elapsed", async () => {
+    usePlaySessionStore.setState({ step: "launching" });
+    await renderBar("patching");
+    await emit("launch-progress", waiting);
+
+    expect(screen.getByText("Launch League")).toBeInTheDocument();
+    expect(
+      screen.getByText("Waiting for the Riot Client to finish starting up..."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("12s")).toBeInTheDocument();
+  });
+
+  /// "Launch League only" runs no patcher, so the build and patcher steps are
+  /// not part of that session at all.
+  it("shows only the launch step for a launch with no patcher", async () => {
+    usePlaySessionStore.setState({ step: "launching" });
+    await renderBar("idle");
+    await emit("launch-progress", { stage: "handingOff", waitedSecs: 0, timeoutSecs: 0 });
+
+    expect(screen.getByText("Launch League")).toBeInTheDocument();
+    expect(screen.queryByText("Build overlay")).not.toBeInTheDocument();
+    expect(screen.queryByText("Start patcher")).not.toBeInTheDocument();
+  });
+
+  /// Once the session settles the stepper has nothing left to say, and leaving
+  /// it up for a whole game is noise.
+  it("collapses to a resting line once the patcher is up and nothing is launching", async () => {
+    await renderBar("patching");
+
+    expect(screen.getByText("Patcher running")).toBeInTheDocument();
+    expect(screen.getByText(/mods will be applied when League starts/i)).toBeInTheDocument();
+    expect(screen.queryByText("Build overlay")).not.toBeInTheDocument();
+  });
+
+  it("marks the launch step failed when the launch errors", async () => {
+    usePlaySessionStore.setState({ step: "launching" });
+    await renderBar("patching");
+    await emit("launch-progress", { stage: "error", waitedSecs: 0, timeoutSecs: 0 });
+
+    expect(screen.getByText("Could not start League.")).toBeInTheDocument();
+  });
+
+  describe("the verdict line", () => {
+    /// A crash is a question the player comes back to, so the bar keeps the
+    /// answer where the idle line would be: the verdict, what it is about, who
+    /// it names, and how sure it is.
+    it("keeps the last game's verdict in the idle line's place", async () => {
+      useIncidentLineStore.setState({ incident: missingData });
+      await renderIdleBar();
+
+      expect(screen.getByText("League closed")).toBeInTheDocument();
+      expect(screen.getByText("Missing Game Data")).toBeInTheDocument();
+      expect(screen.getByText("Aatrox.wad.client")).toBeInTheDocument();
+      expect(screen.getByText("Aatrox Justicar")).toBeInTheDocument();
+      expect(screen.getByText("+1")).toBeInTheDocument();
+      expect(screen.getByText("Game stopped")).toBeInTheDocument();
+      expect(screen.queryByText("Patcher idle")).not.toBeInTheDocument();
+    });
+
+    /// Every verdict costs the player something, so the chip is always there.
+    /// A verdict that blames nothing still must not invent a suspect.
+    it("names what an unmodded game cost, and no suspect", async () => {
+      useIncidentLineStore.setState({
+        incident: {
+          ...missingData,
+          suspects: [],
+          verdict: {
+            kind: "unmodded",
+            title: "No Mods Applied",
+            cause: "No mod was in the game.",
+            subject: null,
+            consequence: "overlay-off",
+            titleOverride: null,
+            hints: [],
+          },
+        },
+      });
+      await renderIdleBar();
+
+      expect(screen.getByText("No Mods Applied")).toBeInTheDocument();
+      expect(screen.getByText("No mod ran")).toBeInTheDocument();
+      expect(screen.queryByText("Aatrox Justicar")).not.toBeInTheDocument();
+    });
+
+    /// The hint is the verdict's word that a rebuild is worth trying, so the
+    /// line offers it there and nowhere else.
+    it("offers the rebuild the verdict's hint asks for", async () => {
+      useIncidentLineStore.setState({
+        incident: {
+          ...missingData,
+          verdict: { ...missingData.verdict, hints: ["rebuild-overlay"] },
+        },
+      });
+      await renderIdleBar();
+
+      await userEvent.click(screen.getByRole("button", { name: "Rebuild overlay" }));
+
+      await waitFor(() =>
+        expect(mockInvoke.mock.calls.map(([cmd]) => cmd)).toContain(
+          commandNames.patcher.rebuildOverlay,
+        ),
+      );
+    });
+
+    it("offers no rebuild under a verdict without the hint", async () => {
+      useIncidentLineStore.setState({ incident: missingData });
+      await renderIdleBar();
+
+      expect(screen.queryByRole("button", { name: /Rebuild/ })).not.toBeInTheDocument();
+    });
+
+    it("opens the Games tab on the incident from Details", async () => {
+      useIncidentLineStore.setState({ incident: missingData });
+      await renderIdleBar();
+
+      await userEvent.click(screen.getByRole("button", { name: "Details" }));
+
+      expect(mockNavigate).toHaveBeenCalledWith({
+        to: "/diagnostics",
+        search: { tab: "games", incident: missingData.id },
+      });
+    });
+
+    /// The close is the user's statement that they have read it, so it is
+    /// recorded on the incident and not only cleared from the bar.
+    it("dismisses the incident and gives the idle line back", async () => {
+      useIncidentLineStore.setState({ incident: missingData });
+      await renderIdleBar();
+
+      await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+      expect(await screen.findByText("Patcher idle")).toBeInTheDocument();
+      expect(mockInvoke).toHaveBeenCalledWith(commandNames.diagnostics.dismissIncident, {
+        id: missingData.id,
+      });
+    });
+
+    /// The bar's job is the present. The incident waits on the Games tab.
+    it("yields to a build that starts", async () => {
+      useIncidentLineStore.setState({ incident: missingData });
+      await renderBar("building");
+
+      expect(screen.getByText("Build overlay")).toBeInTheDocument();
+      expect(screen.queryByText("League closed")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("the failed start line", () => {
+    /// Antivirus, a declined UAC prompt and a missing binary are what the
+    /// System checks look for, so a host that did not start points there.
+    it("names a host that did not start and points at the System tab", async () => {
+      usePatcherFailureStore.setState({
+        failure: { stage: "HOST", message: "cslol-host.exe exited before it was ready" },
+      });
+      await renderIdleBar();
+
+      expect(screen.getByText("Injection Host Failure")).toBeInTheDocument();
+      expect(screen.getByText("cslol-host.exe exited before it was ready")).toBeInTheDocument();
+      expect(screen.queryByText("Patcher idle")).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
+      expect(mockNavigate).toHaveBeenCalledWith({
+        to: "/diagnostics",
+        search: { tab: "system" },
+      });
+    });
+
+    /// A DLL that did not attach is the incident's business.
+    it("names a DLL that did not attach and points at the Games tab", async () => {
+      usePatcherFailureStore.setState({
+        failure: { stage: "INJECTION", message: "DLL never attached after 60s" },
+      });
+      await renderIdleBar();
+
+      expect(screen.getByText("DLL Injection Failure")).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
+      expect(mockNavigate).toHaveBeenCalledWith({
+        to: "/diagnostics",
+        search: { tab: "games" },
+      });
+    });
+
+    it("names a build that failed", async () => {
+      usePatcherFailureStore.setState({
+        failure: { stage: "BUILD", message: "WAD error: Aatrox.wad.client is truncated" },
+      });
+      await renderIdleBar();
+
+      expect(screen.getByText("Overlay Build Failure")).toBeInTheDocument();
+      expect(screen.getByText("WAD error: Aatrox.wad.client is truncated")).toBeInTheDocument();
+    });
+
+    it("closes on the cross", async () => {
+      usePatcherFailureStore.setState({
+        failure: { stage: "HOST", message: "cslol-host.exe exited before it was ready" },
+      });
+      await renderIdleBar();
+
+      await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+      expect(await screen.findByText("Patcher idle")).toBeInTheDocument();
+      expect(usePatcherFailureStore.getState().failure).toBeNull();
+    });
+
+    /// A build that starts is the user trying again, and the start that failed
+    /// before it is history.
+    it("clears when the next build starts", async () => {
+      usePatcherFailureStore.setState({
+        failure: { stage: "BUILD", message: "WAD error: Aatrox.wad.client is truncated" },
+      });
+      await renderBar("building");
+
+      await waitFor(() => {
+        expect(usePatcherFailureStore.getState().failure).toBeNull();
+      });
+    });
+
+    /// The incident is the classified record of the same failure, with the
+    /// suspects and the evidence the raw error lacks.
+    it("is outranked by the incident that classifies it", async () => {
+      usePatcherFailureStore.setState({
+        failure: { stage: "HOST", message: "cslol-host.exe exited before it was ready" },
+      });
+      useIncidentLineStore.setState({ incident: missingData });
+      await renderIdleBar();
+
+      expect(screen.getByText("League closed")).toBeInTheDocument();
+      expect(screen.queryByText("Injection Host Failure")).not.toBeInTheDocument();
+    });
+  });
+
+  /// A cancel is the user's own doing, so the bar has to close on it without
+  /// ever reading as something that went wrong.
+  it("reports a cancelled launch as cancelled rather than failed", async () => {
+    usePlaySessionStore.setState({ step: "launching" });
+    await renderBar("patching");
+    await emit("launch-progress", { stage: "stopped", waitedSecs: 0, timeoutSecs: 0 });
+
+    expect(screen.getByText(/^Cancelled\./)).toBeInTheDocument();
+    expect(screen.queryByText("Could not start League.")).not.toBeInTheDocument();
+  });
+
+  /// The launch blocks for up to two minutes from cold, which is exactly when
+  /// a way out is worth having.
+  it("offers a cancel while the launch is in flight", async () => {
+    usePlaySessionStore.setState({ step: "launching" });
+    await renderBar("patching");
+    await emit("launch-progress", waiting);
+
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+  });
+
+  /// The gap this whole migration exists to close: the request is delivered
+  /// seconds to minutes before the game appears, and the bar used to go quiet
+  /// for all of it.
+  it("keeps waiting after the launch is delivered, until the game is up", async () => {
+    usePlaySessionStore.setState({ step: "launching" });
+    await renderBar("patching");
+
+    // The events are `useLeagueSession`'s to receive, and it puts them here.
+    await act(async () => {
+      usePlaySessionStore
+        .getState()
+        .sessionStarted({ phase: "Pending", running: false, version: "24C2E5A086AFFB82" });
+    });
+
+    expect(screen.getByText("Waiting for League to start...")).toBeInTheDocument();
+    expect(screen.getByText("Riot Client session: Pending")).toBeInTheDocument();
+    expect(screen.getByText("In game")).toBeInTheDocument();
+  });
+
+  it("rests on the live session once the game is up", async () => {
+    usePlaySessionStore.setState({
+      step: "in-game",
+      session: { phase: "None", running: true, version: "24C2E5A086AFFB82" },
+    });
+    mockPatcher("patching");
+    renderWithProviders(<SessionBar />);
+
+    expect(await screen.findByText("Your mods are being applied.")).toBeInTheDocument();
+    expect(screen.getByText("In game")).toBeInTheDocument();
+    expect(screen.getByText("24C2E5A086AFFB82")).toBeInTheDocument();
+    expect(screen.queryByText("Build overlay")).not.toBeInTheDocument();
+  });
+
+  it("names the project a session is testing", async () => {
+    usePlaySessionStore.setState({
+      step: "in-game",
+      session: { phase: "None", running: true, version: "24C2E5A086AFFB82" },
+    });
+    mockPatcher("patching");
+    renderWithProviders(<SessionBar />);
+
+    expect(await screen.findByText("Testing Star Guardian Ahri")).toBeInTheDocument();
+  });
+
+  /// A session followed without the patcher is an ordinary game, and saying
+  /// "your mods are being applied" over one would be a lie.
+  it("says an unpatched game is unmodded", async () => {
+    usePlaySessionStore.setState({
+      step: "in-game",
+      session: { phase: "None", running: true, version: null },
+    });
+    mockPatcher("idle");
+    renderWithProviders(<SessionBar />);
+
+    expect(await screen.findByText(/this game is unmodded/i)).toBeInTheDocument();
+  });
+});

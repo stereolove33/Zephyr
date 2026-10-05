@@ -1,0 +1,53 @@
+name: Publish Zephyr portable release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-portable.yml
+      - zephyr-app/release-manifest.json
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify and assemble portable package
+        run: python3 zephyr-app/publish-release.py
+      - name: Publish release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v$(python3 -c 'import json; print(json.load(open("zephyr-app/release-manifest.json"))["version"])')"
+          package="release-files/Zephyr-${tag}.zip"
+          git tag --force "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag" --force
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "Zephyr ${tag#v}" --notes-file zephyr-app/RELEASE-NOTES.md --latest
+            gh release upload "$tag" "$package" --clobber
+          else
+            gh release create "$tag" "$package" --target "$GITHUB_SHA" --title "Zephyr ${tag#v}" --notes-file zephyr-app/RELEASE-NOTES.md --latest
+          fi
+          for retired in $(python3 -c 'import json,re; tags=json.load(open("zephyr-app/release-manifest.json")).get("retired_releases",[]); assert all(re.fullmatch(r"v[0-9]+[.][0-9]+[.][0-9]+",t) for t in tags); print(" ".join(tags))'); do
+            if [ "$retired" != "$tag" ] && gh release view "$retired" >/dev/null 2>&1; then
+              gh release delete "$retired" --yes --cleanup-tag
+            fi
+            retired_branch="release-inputs-${retired#v}"
+            if git ls-remote --exit-code --heads origin "$retired_branch" >/dev/null 2>&1; then
+              git push origin --delete "$retired_branch"
+            fi
+          done
+          for asset in SHA256SUMS.txt RELEASE-NOTES.md README.md; do
+            if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$asset"; then
+              gh release delete-asset "$tag" "$asset" --yes
+            fi
+          done
+          count=$(gh release view "$tag" --json assets --jq '.assets | length')
+          test "$count" -eq 1

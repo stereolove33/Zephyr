@@ -1,0 +1,21 @@
+export const libraryKeys = {
+  all: ["library"] as const,
+  mods: () => [...libraryKeys.all, "mods"] as const,
+  mod: (id: string) => [...libraryKeys.mods(), id] as const,
+  thumbnail: (modId: string) => [...libraryKeys.mod(modId), "thumbnail"] as const,
+  readme: (modId: string) => [...libraryKeys.mod(modId), "readme"] as const,
+  licenseText: (modId: string) => [...libraryKeys.mod(modId), "licenseText"] as const,
+  thumbnails: (modIds: readonly string[]) =>
+    [...libraryKeys.mods(), "thumbnails", modIds.join(",")] as const,
+  profiles: () => [...libraryKeys.all, "profiles"] as const,
+  activeProfile: () => [...libraryKeys.profiles(), "active"] as const,
+  folders: () => [...libraryKeys.all, "folders"] as const,
+  folderOrder: () => [...libraryKeys.all, "folderOrder"] as const,
+  wadReports: () => [...libraryKeys.all, "wadReport"] as const,
+  modHealthVerdicts: () => [...libraryKeys.all, "modHealthVerdicts"] as const,
+  healthSweep: () => [...libraryKeys.all, "healthSweep"] as const,
+  healthCheckReadiness: () => [...libraryKeys.all, "healthCheckReadiness"] as const,
+  linkedBinOffenders: () => [...libraryKeys.all, "linkedBinOffenders"] as const,
+  checksumMismatches: () => [...libraryKeys.all, "checksumMismatches"] as const,
+  migrationState: () => [...libraryKeys.all, "migrationState"] as const,
+};

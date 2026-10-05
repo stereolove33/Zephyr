@@ -1,0 +1,48 @@
+import { Button, Spinner, Tooltip } from "@/components";
+import { m } from "@/i18n";
+
+import type { TextSaveState } from "../useTextDocumentEditor";
+
+export interface SaveStatusProps {
+  state: TextSaveState;
+  /** What a buffer the file turned down needs, in a few words. */
+  blockedHint: string;
+  /** Why the last write failed, on the failure's hover. */
+  failedReason?: string;
+  onRetry: () => void;
+}
+
+/**
+ * What a self-saving document says about its buffer.
+ *
+ * Quiet when clean: saving is the document's job rather than an event, and
+ * only an edit that is being held back is worth a word.
+ */
+export function SaveStatus({ state, blockedHint, failedReason, onRetry }: SaveStatusProps) {
+  if (state === "pending" || state === "saving") {
+    return <Spinner size="xs" className="shrink-0" />;
+  }
+
+  if (state === "blocked") {
+    /* DS-TEXT */
+    return <span className="shrink-0 text-meta text-warning-text select-none">{blockedHint}</span>;
+  }
+
+  if (state === "failed") {
+    /* DS-TEXT */
+    const failed = (
+      <span className="text-meta text-danger-text select-none">{m.editor_save_failed_hint()}</span>
+    );
+    return (
+      <span className="flex shrink-0 items-center gap-1.5">
+        {failedReason === undefined && failed}
+        {failedReason !== undefined && <Tooltip content={failedReason}>{failed}</Tooltip>}
+        <Button variant="ghost" size="xs" compact onClick={onRetry}>
+          {m.editor_save_retry_action()}
+        </Button>
+      </span>
+    );
+  }
+
+  return null;
+}

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "LTK Manager",
+  "identifier": "dev.leaguetoolkit.manager",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "pnpm build:app",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "LTK Manager",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "decorations": false,
+        "resizable": true,
+        "transparent": false,
+        "visible": false,
+        "backgroundColor": "#0c0d18"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: data: http://asset.localhost ltk-asset: http://ltk-asset.localhost; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost ltk-asset: http://ltk-asset.localhost; media-src 'self' ltk-asset: http://ltk-asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:",
+      "dangerousDisableAssetCspModification": ["style-src"],
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "resources/**/*": "./",
+      "file-icons/*.ico": "file-icons/"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "signCommand": "trusted-signing-cli -e https://eus.codesigning.azure.net/ -a runeforge -c Natoken -d LTK-Manager %1",
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installerHooks": "./windows/installer-hooks.nsh",
+        "installMode": "perMachine"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["ltk"]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEwQjBFRkU5MDdENUVENTIKUldSUzdkVUg2ZSt3b0pldjRGZUQ3WkgwcjU0M2d5N1pnRGlhR0NPODkyMWpyaTEvUFQvWWlpcVkK",
+      "endpoints": [
+        "https://github.com/LeagueToolkit/ltk-manager/releases/download/updater/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

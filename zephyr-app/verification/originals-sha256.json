@@ -1,0 +1,325 @@
+{
+  "algorithm": "SHA256",
+  "files": [
+    {
+      "path": "originals/R3nzSkin.dll",
+      "sha256": "af04b42974bb152dc712d01f137e7f82feca20fbb2d650ee1d8ad7be0f412d6e"
+    },
+    {
+      "path": "originals/j5nYI6re.exe",
+      "sha256": "e49ce3ab78ca0e04a7a8a3b9d69091b0deadd03a25ce218c605863aeaf40b7ff"
+    },
+    {
+      "path": "original-source/.gitattributes",
+      "sha256": "2432d5e53156b2e365d202c18d986553a7c8c40219bbffe58bbbb54335af1d99"
+    },
+    {
+      "path": "original-source/.github/workflows/windows.yml",
+      "sha256": "a026a469d9fcce6146e91b4a97e2d46b3730349c650b37c89ac17d5ea1467c95"
+    },
+    {
+      "path": "original-source/.gitignore",
+      "sha256": "9c99f6f28aa89ab984a93fb86ec9c8987ca30d21c6406acee959760a4f471ccb"
+    },
+    {
+      "path": "original-source/LICENSE",
+      "sha256": "1c65ee0f7984f6161797ed3e3d51d8185c09cf78317a6d95982c3b5a2e82305c"
+    },
+    {
+      "path": "original-source/PythonScripts/lolskin_to_skin.py",
+      "sha256": "4d9cef8103edf97efef5aab977cf9742ee0cfa0d2385584adef5016d932da48a"
+    },
+    {
+      "path": "original-source/R3nzSkin/CheatManager.hpp",
+      "sha256": "97fed557b4b7000536a3e803c247f07c3d779aac23d8099123e8c690d0bcd8a7"
+    },
+    {
+      "path": "original-source/R3nzSkin/Config.cpp",
+      "sha256": "655500c96018b27c7fd22793382242e797889c2078e5928ece4d41a48966ba11"
+    },
+    {
+      "path": "original-source/R3nzSkin/Config.hpp",
+      "sha256": "89ae9d2a8d1a3312cd5d3300b7d43e069611c511489b3647db5d9c9bed0d9e58"
+    },
+    {
+      "path": "original-source/R3nzSkin/GUI.cpp",
+      "sha256": "0bf1e4861db86cc93a4171b6224460dd593191a8d3a381f7195a06dea86f7923"
+    },
+    {
+      "path": "original-source/R3nzSkin/GUI.hpp",
+      "sha256": "c3b5f4a373a39bc3e79cebb0afa524833d57c64e74806eb5f4b022645165e4b3"
+    },
+    {
+      "path": "original-source/R3nzSkin/Hooks.cpp",
+      "sha256": "26e229cedf7024b6d5f964ef3e81d229c7fcffbee52f2fe53c3e4c32a444c85c"
+    },
+    {
+      "path": "original-source/R3nzSkin/Hooks.hpp",
+      "sha256": "33c85803b7ceb850c75aa04ce4e1028510761d1c31fda172629924cbfcabd923"
+    },
+    {
+      "path": "original-source/R3nzSkin/Logger.hpp",
+      "sha256": "f0b4ef0270be306ff241e3c8cd3c91c9fa05ae0e14d1a2b702d0dc8f0cecaafd"
+    },
+    {
+      "path": "original-source/R3nzSkin/R3nzSkin.cpp",
+      "sha256": "be9482914a605b0e3bd13629d1c80472a278e71ead1a1e1718ddc0da32815b9d"
+    },
+    {
+      "path": "original-source/R3nzSkin/R3nzSkin.rc",
+      "sha256": "b776df473645f893638f9f3de0aa1501eaf1eadd4e7c7aca20cec43b9a225119"
+    },
+    {
+      "path": "original-source/R3nzSkin/R3nzSkin.vcxproj",
+      "sha256": "2629a0d9e7bf400662d6ae8ccdbe636b18344146dc580338a6f23b598ef6df72"
+    },
+    {
+      "path": "original-source/R3nzSkin/R3nzSkin.vcxproj.filters",
+      "sha256": "18cbcfd7ae8edeb853a9d21e820193e5e61e7900f00eaa210a02d717d1cbfce6"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/AIBaseCommon.cpp",
+      "sha256": "e0abb0a7a733acafb900f09a6aa6c83ed19848912b981474f57eadc40bef67f4"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/AIBaseCommon.hpp",
+      "sha256": "7a00bb23bb314875676f370a4a9aea1eb304da786ad8472f189560f146f5eab5"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/AIHero.hpp",
+      "sha256": "8bc792ee700110eae288da23d3c3731c58433ca6e3a7506bc0342e203566d532"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/AIMinionClient.cpp",
+      "sha256": "17e44fdbde76c4d372c54a165f4b3be8b1e22d6a14d93db2b492168695e0bba5"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/AIMinionClient.hpp",
+      "sha256": "c774b603992ca6a89e532dc79952f4733fd37f976ea2c2d9675923af639f38d1"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/AITurret.hpp",
+      "sha256": "cfe450ee5532fa92ca825b1bf44749203ba889219118a280092ac1157cfe0c44"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/AString.hpp",
+      "sha256": "234935fdb37990778658d6b43ed90c73de94fbe967d62784200bc6bf089cce09"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/Champion.hpp",
+      "sha256": "764d5fd8fb8749f659ea4a5b7e919a74a554822fa65bf3e4a4194f718d6a90d9"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/ChampionManager.hpp",
+      "sha256": "9f0e250ec10ba4313492a8c4c1d52c17be33b576a29ecb5eaaaa0929b729c12f"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/CharacterDataStack.cpp",
+      "sha256": "7c58138b5173a16fd1365abdd7102aa601487712251dd0dd46e2e39e1aadd61d"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/CharacterDataStack.hpp",
+      "sha256": "f7d728cca7164acbbc619c9a773530dbf2a756da9756c0b220524d9dcbf89691"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/CharacterStackData.hpp",
+      "sha256": "3e8d7cd012dcbc1eacc2ffef8e49fbe0a4701abcde5683130a5c65058b83e97a"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/GameClient.hpp",
+      "sha256": "7f7789c21f0e63563a632ebeed757e95e8550f55fc67a64e41ea8f24ee492d0a"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/GameObject.hpp",
+      "sha256": "da112138fb721a6189c830b93e4a3b496034fe948b936567877fc9326b7b5845"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/GameState.hpp",
+      "sha256": "df0a7dddcd1ca952af1e8ff6dc53ca0645226cd278e6d8d7e4da81214089f49b"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/ManagerTemplate.hpp",
+      "sha256": "e25ce17d1ba48b60710d774c9f78aabec3f0d5a714e30f1cb3bb6ad60c3cd123"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/Pad.hpp",
+      "sha256": "5e91b89077621c6913596d4f5612b9f05359236453b2e724367771faf8b8fa97"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/RiotArray.hpp",
+      "sha256": "30f8ab675e23c5fccfcc1c08dc89c17bcbefb26d9200bbe78b3874ad447caddb"
+    },
+    {
+      "path": "original-source/R3nzSkin/SDK/Skin.hpp",
+      "sha256": "d6239342e4210eb7cb1c0960c8178e2b65912826b6e809b4f64e05caf83370a1"
+    },
+    {
+      "path": "original-source/R3nzSkin/SkinDatabase.cpp",
+      "sha256": "f74a9f917a755230615e8a26c9a72cfc1b3ce3a39e90f87a2240279f820dacc1"
+    },
+    {
+      "path": "original-source/R3nzSkin/SkinDatabase.hpp",
+      "sha256": "49353b1b5f1a073f442999aa04bcb58e9265666718e8d566501f16469f7052ff"
+    },
+    {
+      "path": "original-source/R3nzSkin/Utils.cpp",
+      "sha256": "949beee466e6069493378e994ab203157e35ef0e323217c79c3377793c14d0d3"
+    },
+    {
+      "path": "original-source/R3nzSkin/Utils.hpp",
+      "sha256": "c9cf3d54cd55753d92207245dc9cd2a43d0cf0df1724c3a29422a1d5159afaab"
+    },
+    {
+      "path": "original-source/R3nzSkin/encryption.hpp",
+      "sha256": "2efa590fed1b7976d6ad48e50395577fccb54f39a728217555a2332a7d0b8409"
+    },
+    {
+      "path": "original-source/R3nzSkin/fnv_hash.hpp",
+      "sha256": "2d802122f74650aff184ef760c950c7e95cd45ab90eaaac8a777d0f25564ee52"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imconfig.h",
+      "sha256": "b2d4a8b41a079da7e1da63530be4dfecd8c55294cbcf6c282f15ada3a682e490"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui.cpp",
+      "sha256": "064c3f190ebbc823aeb5d8e52807132ab93a0ac27411f15edd77bff6a799ce67"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui.h",
+      "sha256": "4e76960cc5de7584c29bd6b61d5d522401a3779061964f8cd0ccadc101fe09f4"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui_demo.cpp",
+      "sha256": "ee23d860066323badf75b2fe4a3e0ae2739c11971d5c5b304ac60274e13dbfe2"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui_draw.cpp",
+      "sha256": "808c353df106f2cd572fd1f8e0a670ff3ab69caf9adfad22de2471526bed5c36"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui_impl_dx11.cpp",
+      "sha256": "b63ece5d10d9ece7ff16b9f4b190f81b3289a8c095edf2ae006eb5c6e1ad89ab"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui_impl_dx11.h",
+      "sha256": "ac65ad578385fbc45800bb70b144f76cbe2d78a83199d199ef0bf25e7a065005"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui_impl_win32.cpp",
+      "sha256": "6d575828a6aae35646a3dcd5d5926ddccd7baa38b6fce7883afcb21433159bfd"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui_impl_win32.h",
+      "sha256": "34b91e5a6753efd13b38fa05103e599cb5df2b2a78f94ab07104160c91f48058"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui_internal.h",
+      "sha256": "c991ca24ea2b8f728557cb572f52acd567a7accc6c23717c5ae69f830feadf54"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui_tables.cpp",
+      "sha256": "7e503407c3eed64860b6fd8446200afd2ee3f80ba73723987bc8792e1336740d"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imgui_widgets.cpp",
+      "sha256": "0c2e945eca92b67f7f36d3ca479e7224e2ccfb1ca7a1c859c872aec79640f1e1"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imstb_rectpack.h",
+      "sha256": "a53bcd85861ff53ca1526407db1f6fd2ad619636327dcf1e6318f33e545068dd"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imstb_textedit.h",
+      "sha256": "686a603897d8ff024fd7dbc4bfe582ebb66b4581b89b084d69f899a9076847d2"
+    },
+    {
+      "path": "original-source/R3nzSkin/imgui/imstb_truetype.h",
+      "sha256": "87345e551d9f0060f7551c804fe7ed02e57580c0a22f979442660e2781a973b4"
+    },
+    {
+      "path": "original-source/R3nzSkin/json/json.hpp",
+      "sha256": "ad386ccaeed3c0534c097d17232b061a1961c93fb76650ed2adf15acc4d2e729"
+    },
+    {
+      "path": "original-source/R3nzSkin/memory.cpp",
+      "sha256": "73df79e73ddee18173569dd9ff2a71b1c20d1797fb30eb9c2b9752cf4fbee5e5"
+    },
+    {
+      "path": "original-source/R3nzSkin/memory.hpp",
+      "sha256": "6551c996dc7c0691bdf59ad9b3f7aa69253116d2425e5c40e51f43d16a592925"
+    },
+    {
+      "path": "original-source/R3nzSkin/offsets.hpp",
+      "sha256": "8d5940db44cc557a28556afd897a1ee92980be2fd4adc6a54dbbc84528ed14bc"
+    },
+    {
+      "path": "original-source/R3nzSkin/resource.h",
+      "sha256": "aa54f3b0dbb7c0bdbfc7e1f9bca9d43e389001f77d7250ee7f016faefa097baa"
+    },
+    {
+      "path": "original-source/R3nzSkin/vmt_smart_hook.hpp",
+      "sha256": "b0761ed380703b99a38e3522231b35d7f7050e833c6343ff24c51696419f311b"
+    },
+    {
+      "path": "original-source/R3nzSkin.sln",
+      "sha256": "1ad93db38640ad2f541e874b92ad340571ada74541d722fdafcf318f4776b452"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/Injector.cpp",
+      "sha256": "e7dd50129386d6e3b722e5e71946ad6b0afebd8ad37775d0eb7b00c2c63821aa"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/Injector.hpp",
+      "sha256": "8497eeedf67e922f49a8a0a826f208ff6884caecb5407365016c3e8a0c8ca158"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/R3nzSkin_Injector.rc",
+      "sha256": "d3361171e92a2569d3de865fd2fab014c8e9a353126c5ea24032e084d38e3d88"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/R3nzSkin_Injector.vcxproj",
+      "sha256": "1caf92e10c96a6f7b0f7f34fb595746bd276b5ba3912791c9ddc396212e3b2e3"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/R3nzSkin_Injector.vcxproj.filters",
+      "sha256": "0bf94650f26bbdb40d99395beb4e118df2cc04715644f378790ce32d7129e665"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/R3nzUI.hpp",
+      "sha256": "d492ed21dccaabedc8885765c467865b74a777ff2945f7081a812ca38c413a33"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/R3nzUI.resx",
+      "sha256": "2f38d6c8c78501d9b583bf811f67145811c7fe6939b82d487563cdbea7b1d4e8"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/icon.ico",
+      "sha256": "36a3dec4e90f917e9c52964142281329743391104bad2b8c80a097c538df1b41"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/lazy_importer.hpp",
+      "sha256": "94fc55de0c0ae34ca6734ca84fb51144257a31db0990db7b637f2da40a540d52"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/main.cpp",
+      "sha256": "b44033cdadd887b0846ad53e411c8463be4092986af51d0b35bd4ae21533641b"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/resource.h",
+      "sha256": "44c1dc74e2a3edde2517e4c89c05de8519ee5cb0ff8df7a85e89e3ba5230729a"
+    },
+    {
+      "path": "original-source/R3nzSkin_Injector/xorstr.hpp",
+      "sha256": "22dabbed96c9b611d29f70d24db7696ad1cf2552ca58d9f6c3e946bf208c932f"
+    },
+    {
+      "path": "original-source/README.md",
+      "sha256": "d354f6f597add9de7c8c21416bfd5f46bcb1d1bbaa265e5381cdf1cafa4bc98d"
+    },
+    {
+      "path": "original-source/README_zh.md",
+      "sha256": "3eba057ac3281177a9c113b2e91b6dea8ccb2438f0b19d9a71aa4f745221d3c1"
+    }
+  ]
+}

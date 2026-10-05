@@ -1,0 +1,345 @@
+import {
+  ArrowSquareOutIcon,
+  CopyIcon,
+  HashIcon,
+  LinkIcon,
+  MagnifyingGlassIcon,
+  PathIcon,
+  PencilSimpleIcon,
+  TreeStructureIcon,
+  WaveSineIcon,
+} from "@phosphor-icons/react";
+import { use } from "react";
+
+import { ContextMenu } from "@/components";
+import { useCopyToClipboard } from "@/hooks";
+import { m } from "@/i18n";
+import type { BinRow, BinValue } from "@/lib/tauri";
+
+import type { ContentDocument } from "../../../documents/utils/contentDocument";
+import { useRevealInObjects } from "../../../objectsBrowser/hooks/useRevealInObjects";
+import type { OpenIntent } from "../../../palette/utils/types";
+import {
+  classReferences,
+  embeddedReferences,
+  objectReferences,
+  useFindReferences,
+} from "../../../references/api/useFindReferences";
+import { useOpenDocumentAs } from "../../../state";
+import { ResetMenuItem } from "../../classes/components/ResetMenuItem";
+import { useCurveDock } from "../../curves/state/curveTarget";
+import { RevertMenuItem } from "../../documents/components/ChangeMark";
+import { DeclarationMenuItems } from "../../documents/components/DeclarationMenuItems";
+import { ObjectMenuItems } from "../../documents/components/ObjectMenuItems";
+import { useDeclaredObject, useDeclares } from "../../documents/hooks/useDeclared";
+import {
+  type LinkTargets,
+  useLayerTitle,
+  useLinkOpen,
+  useLinkTargets,
+  useObjectOpen,
+} from "../../links/hooks/useLinkTargets";
+import { decideLink, type LinkDecision, type MissingChunk } from "../../links/utils/linkDecision";
+import { nameHash } from "../../shared/utils/binHash";
+import { useValueMark } from "../../values/hooks/useValueMarks";
+import { markText } from "../../values/utils/valueRows";
+import { BinEditContext } from "../hooks/useBinEdit";
+import { LeafEditContext } from "../hooks/useLeafEdit";
+import { fieldHash, type VisibleRow } from "../utils/binRows";
+import { EDIT_ICON, editLabel, rowEdits, undeclarable } from "../utils/rowEdits";
+
+/** The values a row draws as a chip or text, which open to a field on Edit value. */
+const TEXT_VALUES: ReadonlySet<BinValue["type"]> = new Set([
+  "string",
+  "hash",
+  "objectLink",
+  "wadChunkLink",
+]);
+
+interface BinContextMenuProps {
+  /** The line the menu was opened on. Absent while it has never been opened. */
+  line: VisibleRow | null;
+  /** The name of the object an entry hash addresses, for the path a row copies. */
+  objectName: (entry: string) => string;
+  /** Open the object a row declares. Absent where no row is an object. */
+  onOpenObject?: (row: BinRow, intent: OpenIntent) => void;
+  /** Switch the tab to Properties and reveal the row there. Absent outside a class view. */
+  onShowInProperties?: (key: string) => void;
+}
+
+/**
+ * The list's one menu, aimed at whichever row opened it.
+ *
+ * It enumerates rather than reading what sits under the pointer, per `DS-MENU-SCOPE`, and
+ * "The row menu" in docs/ux/BIN_EDITOR.md is what each item is offered on. Copy path is the
+ * address of ADR-0027 as a person reads it: the object's path and the property path joined
+ * on a colon, and the object's path alone for an object row and a patch target row.
+ */
+export function BinContextMenu({
+  line,
+  objectName,
+  onOpenObject,
+  onShowInProperties,
+}: BinContextMenuProps) {
+  const copy = useCopyToClipboard();
+  const open = useOpenDocumentAs();
+  const revealInObjects = useRevealInObjects();
+  const findReferences = useFindReferences();
+  const targets = useLinkTargets();
+  const { wantOpen } = useLinkOpen();
+  const mark = useValueMark(line?.kind === "row" ? line.key : undefined);
+  const { aim } = useCurveDock();
+  const row = line?.kind === "row" ? line.row : null;
+  const title = useLayerTitle();
+  const edit = use(BinEditContext);
+  const leafEdit = use(LeafEditContext);
+  const declares = useDeclares();
+  const openTarget = useObjectOpen(row?.node === "target" ? row.entry : null);
+  const change = useDeclaredObject(row?.node === "object" ? row.entry : "")?.change ?? null;
+
+  if (row === null || line?.kind !== "row") return null;
+  /* A removed object's row offers its restore and its path, and nothing that reads it. */
+  if (change === "removed") {
+    return (
+      <ContextMenu.Content className="w-56">
+        <ObjectMenuItems row={row} />
+        <ContextMenu.Item
+          icon={<PathIcon />}
+          onClick={() => void copy(row.name, m.workshop_bin_path_label())}
+        >
+          {m.workshop_bin_copy_path_action()}
+        </ContextMenu.Item>
+      </ContextMenu.Content>
+    );
+  }
+  const edits = edit === null ? [] : rowEdits(line);
+  const object = row.node === "object";
+  const target = row.node === "target";
+  const property = row.node === "property";
+  const resets = property && leafEdit !== null;
+  const path = object || target ? row.name : `${objectName(row.entry)}:${row.label}`;
+  const openObject =
+    object && onOpenObject ? (intent: OpenIntent) => onOpenObject(row, intent) : openTarget;
+  const struct = row.value.type === "struct" ? row.value : null;
+  const structName = struct?.class ?? null;
+  const valueText = readableValue(row.value) ?? markText(mark);
+  const valueHash = linkedValueHash(row.value, targets);
+  const link = decideLink(row.value, targets, title);
+  const openLink = linkOpener(row.value, link, open, wantOpen);
+
+  return (
+    <ContextMenu.Content className="w-56">
+      {openLink && (
+        <>
+          <ContextMenu.Item icon={<LinkIcon />} onClick={() => openLink("default")}>
+            {m.workshop_bin_open_link_action()}
+          </ContextMenu.Item>
+          <ContextMenu.Item icon={<LinkIcon />} onClick={() => openLink("beside")}>
+            {m.workshop_bin_open_link_beside_action()}
+          </ContextMenu.Item>
+          <ContextMenu.Separator />
+        </>
+      )}
+      {openObject && (
+        <>
+          <ContextMenu.Item icon={<ArrowSquareOutIcon />} onClick={() => openObject("default")}>
+            {m.workshop_bin_open_object_action()}
+          </ContextMenu.Item>
+          <ContextMenu.Item icon={<ArrowSquareOutIcon />} onClick={() => openObject("beside")}>
+            {m.workshop_bin_open_object_beside_action()}
+          </ContextMenu.Item>
+          <ContextMenu.Separator />
+        </>
+      )}
+      {(object || target) && (
+        <>
+          <ContextMenu.Item
+            icon={<MagnifyingGlassIcon />}
+            onClick={() => findReferences(objectReferences(row.entry, row.name))}
+          >
+            {m.workshop_references_find_object_action()}
+          </ContextMenu.Item>
+          <ContextMenu.Item icon={<TreeStructureIcon />} onClick={() => revealInObjects(row.name)}>
+            {m.workshop_objects_reveal_action()}
+          </ContextMenu.Item>
+        </>
+      )}
+      {struct !== null && (
+        <ContextMenu.Item
+          icon={<MagnifyingGlassIcon />}
+          onClick={() =>
+            findReferences(
+              object
+                ? classReferences(struct.classHash, struct.class)
+                : embeddedReferences(struct.classHash, struct.class),
+            )
+          }
+        >
+          {m.workshop_references_find_class_action()}
+        </ContextMenu.Item>
+      )}
+      {onShowInProperties && (
+        <ContextMenu.Item icon={<TreeStructureIcon />} onClick={() => onShowInProperties(line.key)}>
+          {m.workshop_bin_show_in_properties_action()}
+        </ContextMenu.Item>
+      )}
+      {mark?.curve === true && (
+        <ContextMenu.Item icon={<WaveSineIcon />} onClick={() => aim({ row, chain: row.label })}>
+          {m.workshop_bin_show_curve_action()}
+        </ContextMenu.Item>
+      )}
+      {(object || target || struct !== null || onShowInProperties || mark?.curve === true) && (
+        <ContextMenu.Separator />
+      )}
+      {edit !== null && TEXT_VALUES.has(row.value.type) && (
+        <ContextMenu.Item icon={<PencilSimpleIcon />} onClick={() => edit.editValue(line.key)}>
+          {m.workshop_bin_edit_value_action()}
+        </ContextMenu.Item>
+      )}
+      {edits.map((kind) => {
+        const Glyph = EDIT_ICON[kind];
+        const refused = declares ? undeclarable(kind, row) : null;
+        return (
+          <ContextMenu.Item
+            key={kind}
+            icon={<Glyph />}
+            disabled={refused !== null}
+            title={refused ?? undefined}
+            onClick={() => edit?.run(line, kind)}
+          >
+            {editLabel(kind)}
+          </ContextMenu.Item>
+        );
+      })}
+      {resets && <ResetMenuItem row={row} owner={line.owner} curve={mark?.curve === true} />}
+      <RevertMenuItem row={row} />
+      {(edits.length > 0 || resets) && <ContextMenu.Separator />}
+      <ObjectMenuItems row={row} />
+      <DeclarationMenuItems row={row} />
+      <ContextMenu.Item
+        icon={<PathIcon />}
+        onClick={() => void copy(path, m.workshop_bin_path_label())}
+      >
+        {m.workshop_bin_copy_path_action()}
+      </ContextMenu.Item>
+      {property && !row.unnamed && (
+        <ContextMenu.Item
+          icon={<CopyIcon />}
+          onClick={() => void copy(row.name, m.workshop_bin_name_label())}
+        >
+          {m.workshop_bin_copy_name_action()}
+        </ContextMenu.Item>
+      )}
+      {property && (
+        <ContextMenu.Item
+          icon={<HashIcon />}
+          onClick={() => void copy(fieldHash(row.path), m.workshop_bin_hash_label())}
+        >
+          {m.workshop_bin_copy_field_hash_action()}
+        </ContextMenu.Item>
+      )}
+      {valueText !== null && (
+        <ContextMenu.Item
+          icon={<CopyIcon />}
+          onClick={() => void copy(valueText, m.workshop_bin_value_label())}
+        >
+          {m.workshop_bin_copy_value_action()}
+        </ContextMenu.Item>
+      )}
+      {valueHash !== null && (
+        <ContextMenu.Item
+          icon={<HashIcon />}
+          onClick={() => void copy(valueHash, m.workshop_bin_hash_label())}
+        >
+          {m.workshop_bin_copy_value_hash_action()}
+        </ContextMenu.Item>
+      )}
+      {structName !== null && (
+        <ContextMenu.Item
+          icon={<CopyIcon />}
+          onClick={() => void copy(structName, m.workshop_bin_name_label())}
+        >
+          {m.workshop_bin_copy_class_name_action()}
+        </ContextMenu.Item>
+      )}
+      {struct !== null && (
+        <ContextMenu.Item
+          icon={<HashIcon />}
+          onClick={() => void copy(struct.classHash, m.workshop_bin_hash_label())}
+        >
+          {m.workshop_bin_copy_class_hash_action()}
+        </ContextMenu.Item>
+      )}
+    </ContextMenu.Content>
+  );
+}
+
+/** What Open link does for a row, or null where the row's value opens nothing. */
+function linkOpener(
+  value: BinValue,
+  link: LinkDecision | MissingChunk | null,
+  open: (document: ContentDocument, intent: OpenIntent) => void,
+  wantOpen: (hash: string, intent: OpenIntent) => void,
+): ((intent: OpenIntent) => void) | null {
+  if (link?.kind === "chip") return (intent) => open(link.document, intent);
+  if (link?.kind === "warm" && value.type === "objectLink") {
+    return (intent) => wantOpen(value.hash, intent);
+  }
+  return null;
+}
+
+/**
+ * The hash behind a link value, whether or not a table names it.
+ *
+ * A `string` carries none of its own, so it offers the object hash it was resolved
+ * under and nothing where it resolved to no object.
+ */
+function linkedValueHash(value: BinValue, targets: LinkTargets): string | null {
+  switch (value.type) {
+    case "hash":
+    case "objectLink":
+    case "wadChunkLink":
+      return value.hash;
+    case "string": {
+      const hash = nameHash(value.value);
+      return targets.declared.has(hash) ? hash : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * The value as the one string a reader would take, or null where it reads as none.
+ *
+ * A container, a map, a struct and an optional draw a tally rather than a value, and a
+ * copy of "22 items" is what nobody asked for.
+ */
+function readableValue(value: BinValue): string | null {
+  switch (value.type) {
+    case "bool":
+      return String(value.value);
+    case "integer":
+      return value.text;
+    case "float":
+      return String(value.value);
+    case "vector":
+    case "matrix":
+      return value.values.join(", ");
+    case "color":
+      return `#${[value.r, value.g, value.b, value.a].map(hexByte).join("")}`;
+    case "string":
+      return value.value;
+    case "hash":
+    case "objectLink":
+      return value.name;
+    case "wadChunkLink":
+      return value.path;
+    default:
+      return null;
+  }
+}
+
+function hexByte(channel: number): string {
+  return channel.toString(16).padStart(2, "0").toUpperCase();
+}

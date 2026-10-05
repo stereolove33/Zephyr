@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zephyr</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<main>
+  <header><img class="mark" src="./zephyr-icon.png" alt=""><div><h1>Zephyr</h1><p>Official and custom skins</p></div></header>
+  <section class="official">
+    <div class="heading"><span>OFFICIAL SKINS</span><span id="official-badge" class="badge">Stopped</span></div>
+    <button id="start" class="primary">Start</button>
+    <p id="official-status" class="status" role="status">Start waits for a match and loads the in-game menu.</p>
+  </section>
+  <section>
+    <div class="heading"><span>CUSTOM SKINS</span><span id="custom-badge" class="badge">Stopped</span></div>
+    <button id="add" class="outline">+ Add custom skin</button>
+    <div id="mods" class="mods"><p class="empty">Add a .modpkg or .fantome file.</p></div>
+    <button id="check-customs" class="outline">Check customs</button>
+    <p id="check-notice" class="status" role="status" hidden></p>
+    <button id="apply" class="secondary">Enable custom skins</button>
+    <p id="custom-status" class="status" role="status">Select custom skins before entering a match.</p>
+  </section>
+  <details><summary>Settings</summary>
+    <label for="language">Language</label>
+    <select id="language"><option value="en">English</option><option value="pt-BR">Português (Brasil)</option></select>
+    <label class="setting-toggle"><input id="auto-run" type="checkbox"><span>Start with Windows</span></label>
+    <label class="setting-toggle"><input id="close-to-tray" type="checkbox" checked><span>Close to system tray</span></label>
+    <p class="status">Use the tray menu to quit the app completely.</p>
+    <label for="league-path">League folder</label>
+    <div class="path"><input id="league-path" placeholder="Installation folder"><button id="browse">Browse</button><button id="detect-path">Auto-detect</button></div>
+    <button id="save-path" class="outline">Save path</button>
+
+  </details>
+  <div id="error" class="error" role="alert" hidden></div>
+  <footer><span>0.2 · Experimental</span></footer>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
