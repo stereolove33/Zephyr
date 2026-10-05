@@ -4,7 +4,7 @@ A Windows desktop app for selecting official and custom League of Legends skins.
 
 - Start button and in-game skin menu
 - Custom skin import and selection before a match
-- English interface and build instructions
+- English/Portuguese interface and build instructions
 
 ## Downloads
 
