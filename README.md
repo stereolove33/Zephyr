@@ -8,7 +8,7 @@ A Windows desktop app for selecting official and custom League of Legends skins.
 
 ## Downloads
 
-[Downloads](https://github.com/stereolove33/Zephyr/releases) the Windows installer. Source code archives and any published verification files are available alongside each release.
+[Download](https://github.com/stereolove33/Zephyr/releases) the Windows installer. Source code archives and any published verification files are available alongside each release.
 
 ## Status
 
