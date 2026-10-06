@@ -7,6 +7,7 @@ import { automaticLabels, preflightIssues, healthLabel } from "./custom-analysis
 import { createUpdateController } from "./updates.mjs";
 import { detectFirstLeaguePath } from "./auto-path.mjs";
 import { createStartupTransition } from "./startup.mjs";
+import { applyCustomOrder, moveCustomOrder } from "./custom-order.mjs";
 
 const analyses = new Map();
 const el = (id) => document.getElementById(id);
@@ -15,6 +16,16 @@ let mods = [];
 let busy = false;
 let customsEnabled = true;
 let settings;
+let closingGame = false;
+let customOrder = [];
+let draggedCustom = null;
+try { customOrder = JSON.parse(localStorage.getItem("zephyr.custom-order.v1") || "[]"); } catch {}
+const customSection = el("custom-section");
+try { customSection.open = localStorage.getItem("zephyr.custom-section.v1") !== "closed"; } catch {}
+customSection.addEventListener("toggle", () => {
+  try { localStorage.setItem("zephyr.custom-section.v1", customSection.open ? "open" : "closed"); } catch {}
+});
+let gameCloseMessage = "Closes the match only. Keep Zephyr running and click Reconnect in the League client.";
 const startup = createStartupTransition({
   reveal() {
     requestAnimationFrame(() => {
@@ -27,7 +38,7 @@ const startup = createStartupTransition({
 
 let language = "en";
 try { if (localStorage.getItem("zephyr.language") === "pt-BR") language = "pt-BR"; } catch {}
-const translations = {"Official and custom skins": "Skins oficiais e personalizadas", "OFFICIAL SKINS": "SKINS OFICIAIS", "CUSTOM SKINS": "CUSTOMS", "Stopped": "Parado", "Start": "Iniciar", "Start waits for a match and loads the in-game menu.": "Iniciar aguarda uma partida e carrega o menu no jogo.", "+ Add custom skin": "+ Adicionar custom", "Enable custom skins": "Ativar customs", "Select custom skins before entering a match.": "Selecione as customs antes de entrar em uma partida.", "Settings": "Configurações", "Language": "Idioma", "Start with Windows": "Iniciar com o Windows", "Close to system tray": "Fechar para a bandeja", "Use the tray menu to quit the app completely.": "Use o menu da bandeja para encerrar o aplicativo.", "League folder": "Pasta do League", "Installation folder": "Pasta de instalação", "Browse": "Procurar", "Auto-detect": "Detectar automaticamente", "Save path": "Salvar caminho", "Stop loaders": "Parar carregadores", "1.0.0 · Experimental": "1.0.0 · Experimental", "Add a .modpkg or .fantome file.": "Adicione um arquivo .modpkg ou .fantome.", "Remove": "Remover", "Champion": "Campeão", "Type": "Tipo", "Skin": "Skin", "Font": "Fonte", "UI": "Interface", "Map": "Mapa", "Audio": "Áudio", "Other": "Outro", "Champion name (optional for fonts, UI and other mods)": "Nome do campeão (opcional para fontes, interface e outras customs)", "Stop the loaders before changing custom skins.": "Pare os carregadores antes de alterar as customs.", "Select at least one custom skin.": "Selecione pelo menos uma custom.", "Custom skins": "Customs", "Loaders stopped. Exit the match to unload the DLLs.": "Carregadores parados. Saia da partida para descarregar as DLLs.", "Path saved.": "Caminho salvo.", "Preparing": "Preparando", "Active": "Ativo", "Preparing custom skin files...": "Preparando os arquivos das customs...", "Loader active. Check the skin in the game.": "Carregador ativo. Confira a skin no jogo.", "Injection failed": "Falha na injeção", "DLL loaded": "DLL carregada", "Loading": "Carregando", "Waiting for game": "Aguardando o jogo", "League installation not found. Select the folder with Browse.": "Instalação do League não encontrada. Selecione a pasta com Procurar.", "League folder detected. Click Save path to confirm.": "Pasta do League detectada. Clique em Salvar caminho para confirmar.", "Setting saved.": "Configuração salva."};
+const translations = {"Official and custom skins": "Skins oficiais e personalizadas", "OFFICIAL SKINS": "SKINS OFICIAIS", "Custom skins": "Customs", "Stopped": "Parado", "Start": "Iniciar", "Start waits for a match and loads the in-game menu.": "Iniciar aguarda uma partida e carrega o menu no jogo.", "+ Add custom skin": "+ Adicionar custom", "Enable custom skins": "Ativar customs", "Select custom skins before entering a match.": "Selecione as customs antes de entrar em uma partida.", "Settings": "Configurações", "Language": "Idioma", "Start with Windows": "Iniciar com o Windows", "Close to system tray": "Fechar para a bandeja", "Use the tray menu to quit the app completely.": "Use o menu da bandeja para encerrar o aplicativo.", "League folder": "Pasta do League", "Installation folder": "Pasta de instalação", "Browse": "Procurar", "Auto-detect": "Detectar automaticamente", "Save path": "Salvar caminho", "Stop loaders": "Parar carregadores", "1.0.1 · Experimental": "1.0.1 · Experimental", "Add a .modpkg or .fantome file.": "Adicione um arquivo .modpkg ou .fantome.", "Remove": "Remover", "Champion": "Campeão", "Type": "Tipo", "Skin": "Skin", "Font": "Fonte", "UI": "Interface", "Map": "Mapa", "Audio": "Áudio", "Other": "Outro", "Champion name (optional for fonts, UI and other mods)": "Nome do campeão (opcional para fontes, interface e outras customs)", "Stop the loaders before changing custom skins.": "Pare os carregadores antes de alterar as customs.", "Select at least one custom skin.": "Selecione pelo menos uma custom.", "Custom skins": "Customs", "Loaders stopped. Exit the match to unload the DLLs.": "Carregadores parados. Saia da partida para descarregar as DLLs.", "Path saved.": "Caminho salvo.", "Preparing": "Preparando", "Active": "Ativo", "Preparing custom skin files...": "Preparando os arquivos das customs...", "Loader active. Check the skin in the game.": "Carregador ativo. Confira a skin no jogo.", "Injection failed": "Falha na injeção", "DLL loaded": "DLL carregada", "Loading": "Carregando", "Waiting for game": "Aguardando o jogo", "League installation not found. Select the folder with Browse.": "Instalação do League não encontrada. Selecione a pasta com Procurar.", "League folder detected. Click Save path to confirm.": "Pasta do League detectada. Clique em Salvar caminho para confirmar.", "Setting saved.": "Configuração salva."};
 Object.assign(translations, {"Stop":"Parar", "Mixed": "Misto", "Unknown": "Não identificado", "Check customs": "Verificar customs", "Not checked": "Não verificado", "Errors found": "Erros encontrados", "Warnings found": "Avisos encontrados", "No issues detected": "Nenhum problema detectado", "Check unavailable": "Verificação indisponível", "Labels can be edited; safety checks always use package content.": "Os rótulos podem ser editados; as verificações usam o conteúdo do pacote.", "Checking customs...": "Verificando customs...", "Wait for game hashtable synchronization, then check again.": "Aguarde a sincronização das tabelas do jogo e verifique novamente.", "Checks completed. Unknown labels can be edited manually.": "Verificações concluídas. Rótulos não identificados podem ser editados manualmente.", "Verification incomplete. Customs were not activated.": "Verificação incompleta. As customs não foram ativadas.", "Custom activation blocked.": "Ativação das customs bloqueada.", "Conflicting resources:": "Recursos em conflito:", "Disable the conflicting or broken custom and try again.": "Desative a custom em conflito ou com erro e tente novamente."});
 Object.assign(translations, {
   "Stop custom skins": "Parar customs",
@@ -36,10 +47,20 @@ Object.assign(translations, {
   "Partial check for .modpkg: package reading and conflicts checked; full Mod Health unavailable.": "Verificação parcial de .modpkg: leitura e conflitos verificados; análise completa indisponível."
 });
 Object.assign(translations, {"Zephyr loaded.":"Zephyr carregado.","Zephyr found the game. Waiting to load.":"Zephyr encontrou o jogo. Aguardando o carregamento.","Zephyr is waiting for a match.":"Zephyr está aguardando uma partida.","Zephyr stopped.":"Zephyr parado.","Custom skins stopped.":"Customs paradas.","Internal custom skins component error.":"Falha interna no componente de customs.","Select at least one custom skin before starting.":"Selecione pelo menos uma custom antes de iniciar.","Stop custom skins before changing the library or game folder.":"Pare as customs antes de alterar a biblioteca ou a pasta do jogo."});
-Object.assign(translations, {"If Zephyr does not apply your skins on the first try, close League of Legends, apply your skins again in Zephyr, and relaunch the game.":"Se o Zephyr não aplicar suas skins na primeira tentativa, feche o League of Legends, aplique suas skins novamente no Zephyr e abra o jogo de novo.","Troubleshooting tip":"Dica para resolver problemas"});
+Object.assign(translations, {"If the in-game menu does not appear, use Close game to reconnect, then click Reconnect in the League client. Keep Zephyr running.":"Se o menu no jogo não aparecer, use Fechar jogo para reconectar e depois clique em Reconectar no cliente do League. Mantenha o Zephyr aberto.","Troubleshooting tip":"Dica para resolver problemas"});
 Object.assign(translations, {"Update available":"Atualização disponível","A new version of Zephyr is available:":"Uma nova versão do Zephyr está disponível:","View update":"Ver atualização","Check for updates":"Verificar atualizações","Checking for updates...":"Verificando atualizações...","You are using the latest version.":"Você está usando a versão mais recente.","Could not check for updates. Try again later.":"Não foi possível verificar atualizações. Tente novamente mais tarde."});
+Object.assign(translations, {
+  "Close game to reconnect": "Fechar jogo para reconectar",
+  "Closes the match only. Keep Zephyr running and click Reconnect in the League client.": "Fecha apenas a partida. Mantenha o Zephyr aberto e clique em Reconectar no cliente do League.",
+  "Closing game...": "Fechando o jogo...",
+  "Game closed. Click Reconnect in the League client. Keep Zephyr running.": "Jogo fechado. Clique em Reconectar no cliente do League. Mantenha o Zephyr aberto.",
+  "No running match found.": "Nenhuma partida em execução encontrada.",
+  "Could not close the game. Check that Zephyr has permission to close it.": "Não foi possível fechar o jogo. Verifique se o Zephyr tem permissão para encerrá-lo.",
+  "Set your League folder in Settings before closing the game.": "Configure a pasta do League em Configurações antes de fechar o jogo."
+});
+Object.assign(translations, {"Reorder custom skin": "Reorganizar custom", "Drag to reorder. Use Up and Down arrows when focused.": "Arraste para reorganizar. Com o controle selecionado, use as setas para cima e para baixo."});
 const tr = (text) => language === "pt-BR" ? (translations[text] || text) : text;
-const staticLabels = Array.from(document.querySelectorAll("h1, header p, .heading > span:first-child, button, summary, label:not(.setting-toggle), .setting-toggle span, details .status, footer span")).map(node => [node, node.textContent]);
+const staticLabels = Array.from(document.querySelectorAll("h1, header p, .heading > span:first-child, button, summary:not(.custom-summary), label:not(.setting-toggle), .setting-toggle span, details .status, footer span")).map(node => [node, node.textContent]);
 const updates = createUpdateController({
   check: () => api("check_updates"),
   openRelease: () => api("open_update"),
@@ -59,13 +80,14 @@ el("check-updates").addEventListener("click", () => updates.check());
 el("open-update").addEventListener("click", () => action(() => updates.open()));
 function translatePage() {
   document.documentElement.lang = language;
-  el("startup-tip-text").textContent = tr("If Zephyr does not apply your skins on the first try, close League of Legends, apply your skins again in Zephyr, and relaunch the game.");
+  el("startup-tip-text").textContent = tr("If the in-game menu does not appear, use Close game to reconnect, then click Reconnect in the League client. Keep Zephyr running.");
   el("startup-tip-button").setAttribute("aria-label", tr("Troubleshooting tip"));
   for (const [node, text] of staticLabels) node.textContent = tr(text);
   el("league-path").placeholder = tr("Installation folder");
   el("language").value = language;
   el("official-status").textContent = tr("Start waits for a match and loads the in-game menu.");
   el("custom-status").textContent = tr("Select custom skins before entering a match.");
+  el("close-game-status").textContent = tr(gameCloseMessage);
   updates.refresh();
 }
 
@@ -78,11 +100,11 @@ async function action(fn) {
   if (busy) return;
   busy = true;
   el("error").hidden = true;
-  document.querySelectorAll("button, input, select").forEach((button) => { button.disabled = true; });
+  document.querySelectorAll("button:not(#close-game), input, select").forEach((button) => { button.disabled = true; });
   try { await fn(); } catch (error) { report(error); }
   finally {
     busy = false;
-    document.querySelectorAll("button, input, select").forEach((button) => { button.disabled = false; });
+    document.querySelectorAll("button:not(#close-game), input, select").forEach((button) => { button.disabled = false; });
     updates.refresh();
   }
 }
@@ -124,6 +146,13 @@ function customMetadataFields(mod) {
 
 async function refreshMods() {
   mods = await api("plugin:library|get_installed_mods");
+  renderMods();
+}
+
+function renderMods() {
+  const ordered = applyCustomOrder(mods, customOrder);
+  customOrder = ordered.map(mod => mod.id);
+  try { localStorage.setItem("zephyr.custom-order.v1", JSON.stringify(customOrder)); } catch {}
   el("mods").replaceChildren();
   if (!mods.length) {
     const empty = document.createElement("p");
@@ -131,9 +160,11 @@ async function refreshMods() {
     empty.textContent = tr("Add a .modpkg or .fantome file.");
     el("mods").append(empty);
   }
-  for (const mod of mods) {
+  for (const mod of ordered) {
     const row = document.createElement("div");
     row.className = "mod";
+    row.dataset.modId = mod.id;
+    const grip = createCustomGrip(mod, row);
     const check = document.createElement("input");
     check.type = "checkbox";
     check.checked = mod.enabled;
@@ -153,7 +184,7 @@ async function refreshMods() {
       await api("plugin:library|uninstall_mod", { modId: mod.id });
       await refreshMods();
     }));
-    row.append(check, name, ...customMetadataFields(mod), remove);
+    row.append(grip, check, name, ...customMetadataFields(mod), remove);
     const summary = document.createElement("small");
     summary.className = "mod-summary";
     const analysis = analyses.get(mod.id);
@@ -165,6 +196,77 @@ async function refreshMods() {
   }
 }
 
+
+function clearCustomDrag() {
+  draggedCustom = null;
+  el("mods").querySelectorAll(".mod").forEach(row => row.classList.remove("drop-before", "drop-after", "is-dragging"));
+}
+
+function reorderCustom(source, target, after) {
+  customOrder = moveCustomOrder(customOrder, source, target, after);
+  renderMods();
+}
+
+function createCustomGrip(mod, row) {
+  const grip = document.createElement("button");
+  grip.type = "button";
+  grip.className = "custom-grip";
+  grip.textContent = "⠿";
+  grip.setAttribute("aria-label", tr("Reorder custom skin") + ": " + (mod.displayName || mod.name));
+  grip.title = tr("Drag to reorder. Use Up and Down arrows when focused.");
+  let pointerDrag = null;
+  function updateDrop(event) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointer) return;
+    if (!pointerDrag.moved && Math.hypot(event.clientX - pointerDrag.x, event.clientY - pointerDrag.y) < 4) return;
+    pointerDrag.moved = true;
+    draggedCustom = mod.id;
+    el("mods").querySelectorAll(".mod").forEach(item => item.classList.remove("drop-before", "drop-after"));
+    row.classList.add("is-dragging");
+    grip.setAttribute("aria-grabbed", "true");
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest(".mod");
+    pointerDrag.target = null;
+    if (target && target.parentElement === el("mods") && target !== row) {
+      const bounds = target.getBoundingClientRect();
+      const after = event.clientY > bounds.top + bounds.height / 2;
+      target.classList.add(after ? "drop-after" : "drop-before");
+      pointerDrag.target = { id: target.dataset.modId, after };
+    }
+    const bounds = el("mods").getBoundingClientRect();
+    if (event.clientY < bounds.top + 28) el("mods").scrollTop -= 18;
+    else if (event.clientY > bounds.bottom - 28) el("mods").scrollTop += 18;
+  }
+  function finishDrag(event, cancelled = false) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointer) return;
+    if (!cancelled) updateDrop(event);
+    const target = !cancelled && pointerDrag.target;
+    pointerDrag = null;
+    if (grip.hasPointerCapture(event.pointerId)) grip.releasePointerCapture(event.pointerId);
+    grip.removeAttribute("aria-grabbed");
+    clearCustomDrag();
+    if (target) reorderCustom(mod.id, target.id, target.after);
+  }
+  grip.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || draggedCustom) return;
+    event.preventDefault();
+    grip.focus();
+    pointerDrag = { pointer: event.pointerId, x: event.clientX, y: event.clientY, moved: false, target: null };
+    grip.setPointerCapture(event.pointerId);
+  });
+  grip.addEventListener("pointermove", updateDrop);
+  grip.addEventListener("pointerup", event => finishDrag(event));
+  grip.addEventListener("pointercancel", event => finishDrag(event, true));
+  grip.addEventListener("keydown", event => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const index = customOrder.indexOf(mod.id);
+    const target = customOrder[index + (event.key === "ArrowUp" ? -1 : 1)];
+    if (!target) return;
+    reorderCustom(mod.id, target, event.key === "ArrowDown");
+    const moved = Array.from(el("mods").children).find(item => item.dataset.modId === mod.id);
+    moved?.querySelector(".custom-grip")?.focus();
+  });
+  return grip;
+}
 
 function modName(id) {
   const mod = mods.find(item => item.id === id);
@@ -265,6 +367,27 @@ el("start").addEventListener("click", () => action(async () => {
     el("start").textContent = tr("Stop");
   }, stopLoaders);
 }));
+el("close-game").addEventListener("click", async () => {
+  if (closingGame) return;
+  closingGame = true;
+  el("close-game").disabled = true;
+  gameCloseMessage = "Closing game...";
+  el("close-game-status").textContent = tr(gameCloseMessage);
+  try {
+    const result = await api("close_league_game");
+    gameCloseMessage = result.needsPath ? "Set your League folder in Settings before closing the game."
+      : result.failed ? "Could not close the game. Check that Zephyr has permission to close it."
+      : result.closed ? "Game closed. Click Reconnect in the League client. Keep Zephyr running."
+      : "No running match found.";
+  } catch (error) {
+    gameCloseMessage = "Could not close the game. Check that Zephyr has permission to close it.";
+    report(error);
+  } finally {
+    closingGame = false;
+    el("close-game").disabled = false;
+    el("close-game-status").textContent = tr(gameCloseMessage);
+  }
+});
 el("add").addEventListener("click", () => action(async () => {
   await requireIdleCustom();
   const selected = await open({ multiple: true, filters: [{ name: tr("Custom skins"), extensions: ["modpkg", "fantome"] }] });
@@ -385,3 +508,9 @@ const tipButton = el("startup-tip-button");
 tipButton.addEventListener("click", () => tipButton.parentElement.classList.toggle("is-open"));
 document.addEventListener("pointerdown", (event) => { if (!tipButton.parentElement.contains(event.target)) tipButton.parentElement.classList.remove("is-open"); });
 document.addEventListener("keydown", (event) => { if (event.key === "Escape") { tipButton.parentElement.classList.remove("is-open"); if (document.activeElement === tipButton) tipButton.blur(); } });
+
+// Open the community invite in the default browser.
+el("discord-invite").addEventListener("click", (event) => {
+  event.preventDefault();
+  api("open_discord").catch(report);
+});

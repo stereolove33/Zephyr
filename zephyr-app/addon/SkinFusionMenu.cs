@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
 
 namespace SkinFusion
 {
@@ -26,6 +26,7 @@ namespace SkinFusion
             {
                 if (!AppDomain.CurrentDomain.IsDefaultAppDomain()) return;
                 Log.Write("Extensao carregada no PID " + Process.GetCurrentProcess().Id);
+                TaskbarBranding.SetProcessIdentity();
                 ZephyrBranding.Install();
                 Application.ApplicationExit += delegate { ZephyrBranding.Remove(); };
                 RenameConfig.Install();
@@ -49,6 +50,7 @@ namespace SkinFusion
 
                     Application.Idle -= AttachMenu;
                     EarlyWindow.Remove();
+                    TaskbarBranding.Apply(form);
                     if (Environment.GetEnvironmentVariable("SKINFUSION_CLASSIC") == "1")
                         new CustomsMenu(form);
                     else
@@ -78,6 +80,82 @@ namespace SkinFusion
         }
     }
 
+
+    internal static class TaskbarBranding
+    {
+        internal const string AppId = "stereolove33.Zephyr";
+        private static readonly Guid propertyFormat = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct PropertyKey { internal Guid format; internal uint id; }
+        [StructLayout(LayoutKind.Explicit, Size = 24)]
+        internal struct PropertyValue
+        {
+            [FieldOffset(0)] internal ushort type;
+            [FieldOffset(8)] internal IntPtr text;
+        }
+        [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        internal interface PropertyStore
+        {
+            [PreserveSig] int GetCount(out uint count);
+            [PreserveSig] int GetAt(uint index, out PropertyKey key);
+            [PreserveSig] int GetValue(ref PropertyKey key, out PropertyValue value);
+            [PreserveSig] int SetValue(ref PropertyKey key, ref PropertyValue value);
+            [PreserveSig] int Commit();
+        }
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+        [DllImport("shell32.dll")]
+        internal static extern int SHGetPropertyStoreForWindow(IntPtr window, ref Guid iid, out PropertyStore store);
+        [DllImport("ole32.dll")] internal static extern int PropVariantClear(ref PropertyValue value);
+
+        internal static void SetProcessIdentity()
+        {
+            try { Marshal.ThrowExceptionForHR(SetCurrentProcessExplicitAppUserModelID(AppId)); }
+            catch (Exception error) { Log.Write("Taskbar identity: " + error.Message); }
+        }
+
+        internal static string LauncherPath(string runtime)
+        {
+            string root = Directory.GetParent(runtime.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).FullName;
+            return Path.Combine(root, "Zephyr.exe");
+        }
+
+        private static void Set(PropertyStore store, uint id, string text)
+        {
+            var key = new PropertyKey { format = propertyFormat, id = id };
+            var value = new PropertyValue { type = 31, text = Marshal.StringToCoTaskMemUni(text) };
+            try { Marshal.ThrowExceptionForHR(store.SetValue(ref key, ref value)); }
+            finally { Marshal.FreeCoTaskMem(value.text); }
+        }
+
+        internal static void ApplyToWindow(IntPtr window, string launcher)
+        {
+            PropertyStore store;
+            Guid iid = typeof(PropertyStore).GUID;
+            Marshal.ThrowExceptionForHR(SHGetPropertyStoreForWindow(window, ref iid, out store));
+            try
+            {
+                // Pin the stable launcher, rather than the renamed original host.
+                Set(store, 2, "\"" + launcher + "\"");
+                Set(store, 4, "Zephyr");
+                Set(store, 3, launcher + ",0");
+                Set(store, 5, AppId);
+                Marshal.ThrowExceptionForHR(store.Commit());
+            }
+            finally { Marshal.ReleaseComObject(store); }
+        }
+
+        internal static void Apply(Form form)
+        {
+            try
+            {
+                string launcher = LauncherPath(AppDomain.CurrentDomain.BaseDirectory);
+                if (!File.Exists(launcher)) return;
+                ApplyToWindow(form.Handle, launcher);
+            }
+            catch (Exception error) { Log.Write("Taskbar branding: " + error.Message); }
+        }
+    }
 
     // Thread-local observation of the original window, before WM_SHOWWINDOW is handled.
     // No game process or injection entry point is changed.
@@ -112,6 +190,7 @@ namespace SkinFusion
                 Remove();
                 // Cover synchronously; the original controls stay enabled underneath.
                 StartupCover.Install(form);
+                TaskbarBranding.Apply(form);
                 // Attach through Idle after the original Show/Load sequence has completed.
             }
             catch (Exception error) { Log.Write("Early window: " + error); }

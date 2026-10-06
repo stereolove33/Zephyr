@@ -16,4 +16,4 @@ Publish a stable release with a numeric tag such as v1.0.2 and upload Zephyr-v1.
 
 Run interface tests with Node: node --test --test-isolation=none ui/*.test.mjs. To test release validation, compile verification/UpdateCheckerTests.cs together with addon/UpdateChecker.cs using the .NET Framework C# compiler, referencing System.dll, System.Core.dll, System.Web.Extensions.dll and System.Net.Http.dll, then run the resulting console executable.
 
-Version numbers are changed only when the maintainer explicitly requests a new version. The current application and release remain 1.0.0.
+Version numbers are changed only when the maintainer explicitly requests a new version. The current application and release are 1.0.1.

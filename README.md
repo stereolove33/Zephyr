@@ -2,12 +2,12 @@
 
 A portable Windows app for selecting official and custom League of Legends skins.
 
-[Join the Zephyr Discord](https://discord.gg/fjfssqYZx)
+[Join the Zephyr Discord](https://discord.gg/fjfssqYZx) · [Report an issue](https://github.com/stereolove33/Onslaught/issues)
 
 ## Features
 
 - **Official skins:** select skins through the in-game menu.
-- **Custom skins:** import `.modpkg` and `.fantome` packages, manage your collection and enable selected mods before a match.
+- **Custom skins:** import `.modpkg` and `.fantome` packages, manage your collection, drag mods to reorder them, collapse the section and enable selected mods before a match.
 - **Custom mod checks:** check imported packages for issues and conflicts; `.modpkg` checks are partial.
 
 ## Download and use
@@ -20,7 +20,7 @@ The package includes the application components. Separate R3nzSkin and LTK Manag
 
 The app requires Windows x64, .NET Framework 4.8 and Microsoft Edge WebView2 Runtime. Choose English or Portuguese in Settings.
 
-Select your skins before entering a match. If they do not apply on the first try, close League of Legends, apply them again in Zephyr and relaunch the game.
+Select your skins before entering a match. If the in-game menu does not appear, use **Close game to reconnect**, then click **Reconnect** in the League client. This closes only the match; keep Zephyr running.
 
 On the first launch, Zephyr attempts to detect and save the League folder if no path is configured. Existing paths are respected. If detection fails, use Browse or Auto-detect in Settings.
 
@@ -65,7 +65,7 @@ The current launcher, integration, interface, custom-skin backend and modified i
 - **Check application integrity:** `resources/SHA256SUMS.txt` inside the extracted package records its application files. The release package hash is recorded in [zephyr-app/release-manifest.json](zephyr-app/release-manifest.json).
 - **Read component notices:** see [THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md).
 
-Local checks covered launcher and extension compilation, 26 interface tests, update release validation and startup-cover checks, preparation for both in-game menus and package integrity. The user tested the in-game menu. The original application and LeagueToolkit patcher remain precompiled components.
+Local checks covered launcher and extension compilation, interface and custom-order tests, update release validation, startup-cover checks, taskbar branding, preparation for both in-game menus and package integrity. The user tested the in-game menu. The original application and LeagueToolkit patcher remain precompiled components.
 
 No independent security audit has been completed. Source availability and matching hashes support verification but do not guarantee malware-free software. See [SECURITY.md](SECURITY.md).
 

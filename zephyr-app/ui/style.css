@@ -20,3 +20,11 @@ html.is-loading{overflow:hidden}
 .loading-progress{position:absolute;top:calc(50% + 90px);left:50%;transform:translateX(-50%);width:120px;height:2px;background:#252525;overflow:hidden;border-radius:2px}.loading-progress span{display:block;width:100%;height:100%;background:#fff;transform:scaleX(0);transform-origin:left;animation:startup-progress 1.5s linear forwards}@keyframes startup-progress{to{transform:scaleX(1)}}@media(prefers-reduced-motion:reduce){.loading-progress span{animation:none;transform:scaleX(1)}}
 
 .loading-progress span{animation-play-state:paused}
+
+.close-game{margin-top:14px}#close-game-status{margin-top:8px}
+
+.custom-section{padding:12px;background:var(--card);border-radius:12px;margin-bottom:13px;color:var(--text)}.custom-summary{display:list-item;margin:0;font-size:13px;letter-spacing:0;user-select:none}.custom-summary::marker{font-size:13px}.custom-summary>.badge{float:right;margin-left:8px}.custom-content{padding-top:14px}.custom-grip{width:16px;flex:none;border:0;background:transparent;padding:0;color:var(--muted);cursor:grab;font-size:18px;line-height:1.2}.custom-grip:active{cursor:grabbing}.custom-grip:hover:not(:disabled){background:transparent;color:var(--text)}.mod{position:relative;gap:7px}.mod.is-dragging{opacity:.45}.mod.drop-before::before,.mod.drop-after::after{content:"";position:absolute;left:0;right:0;height:2px;background:#fff;pointer-events:none}.mod.drop-before::before{top:0}.mod.drop-after::after{bottom:0}
+
+.custom-grip{touch-action:none;user-select:none}
+
+.footer-community{display:flex;align-items:center;gap:6px;font-size:inherit;line-height:1}.footer-community span{max-width:none;text-align:left}.footer-community a{display:inline-flex;align-items:center;color:inherit;text-decoration:none}.footer-community svg{display:block;width:1em;height:1em}.footer-community a:hover{opacity:.75}.footer-community a:focus-visible{outline:2px solid #fff;outline-offset:3px}

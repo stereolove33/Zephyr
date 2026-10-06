@@ -28,8 +28,8 @@ internal static class UpdateCheckerTests
     }
     static int Main(string[] args)
     {
-        Expect(Release("1.0.1"), "available");
         Expect(Release("1.0.0"), "current");
+        Expect(Release("1.0.1"), "current");
         Expect(Release("1.0.2"), "available");
         Expect(Release("1.0.10"), "available");
         Expect(Release("1.10.0"), "available");
@@ -38,7 +38,7 @@ internal static class UpdateCheckerTests
         Expect(Release("2.0.0", false, true), "unavailable");
         Expect(Release("2.0.0-beta.1"), "unavailable");
         Expect(Release("garbage"), "unavailable");
-        Expect(Release("01.0.0"), "unavailable");
+        Expect(Release("01.0.1"), "unavailable");
         Expect(Release("999999999999.0.0"), "unavailable");
         Expect(null, "unavailable");
         var missing = Release("2.0.0"); missing["assets"] = new object[0]; Expect(missing, "unavailable");

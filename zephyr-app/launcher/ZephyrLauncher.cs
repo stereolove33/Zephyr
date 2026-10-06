@@ -7,8 +7,8 @@ using System.Windows.Forms;
 using System.Reflection;
 [assembly: AssemblyTitle("Zephyr")]
 [assembly: AssemblyProduct("Zephyr")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
-[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
 internal static class ZephyrLauncher
 {
     static string Hash(string file)

@@ -102,6 +102,49 @@ namespace SkinFusion
         }
     }
 
+    internal static class GameSession
+    {
+        internal static bool Matches(string executable, string leaguePath)
+        {
+            if (String.IsNullOrWhiteSpace(executable) || String.IsNullOrWhiteSpace(leaguePath)) return false;
+            try
+            {
+                string expected = Path.GetFullPath(Path.Combine(leaguePath, "Game", "League of Legends.exe"));
+                return String.Equals(Path.GetFullPath(executable), expected, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (ArgumentException) { return false; }
+            catch (NotSupportedException) { return false; }
+            catch (PathTooLongException) { return false; }
+        }
+
+        internal static object Close(string leaguePath)
+        {
+            if (String.IsNullOrWhiteSpace(leaguePath)) return new { closed = 0, failed = 0, needsPath = true };
+            int closed = 0, failed = 0;
+            foreach (System.Diagnostics.Process game in System.Diagnostics.Process.GetProcessesByName("League of Legends"))
+            {
+                using (game)
+                {
+                    try
+                    {
+                        if (game.HasExited) continue;
+                        if (!Matches(game.MainModule.FileName, leaguePath)) continue;
+                        game.Kill();
+                        closed++;
+                        Log.Write("Closed League game process " + game.Id);
+                    }
+                    catch (InvalidOperationException) { /* Process already exited. */ }
+                    catch (System.ComponentModel.Win32Exception error)
+                    {
+                        failed++;
+                        Log.Write("Unable to close League game process: " + error.Message);
+                    }
+                }
+            }
+            return new { closed = closed, failed = failed, needsPath = false };
+        }
+    }
+
     internal sealed class UiPreferences
     {
         public bool autoRun { get; set; }
@@ -328,12 +371,19 @@ namespace SkinFusion
                 case "startup_ready": return await RevealStartup();
                 case "check_updates": return await updates.Check();
                 case "open_update": return updates.OpenRelease();
+                case "open_discord":
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://discord.gg/fjfssqYZx") { UseShellExecute = true });
+                    return null;
                 case "dialog_open": return OpenDialog(args);
                 case "plugin:injector|official_status": return await original.ReadStatus();
                 case "plugin:injector|start_official":
                     await WaitForOverlay();
                     return await original.SetRunning(true);
                 case "plugin:injector|stop_official": return await original.SetRunning(false);
+                case "close_league_game":
+                    var gameSettings = (Dictionary<string, object>)await Customs(new { op = "list" });
+                    string gameLeaguePath = StringArg(gameSettings, "leaguePath");
+                    return await Task.Run<object>(delegate { return GameSession.Close(gameLeaguePath); });
                 case "plugin:library|get_installed_mods":
                     return ((Dictionary<string, object>)await Customs(new { op = "list" }))["mods"];
                 case "plugin:library|install_mod":

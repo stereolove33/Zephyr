@@ -1,0 +1,1 @@
+using System.Threading;class DummyGame {static void Main(){Thread.Sleep(60000);}}
