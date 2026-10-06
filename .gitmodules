@@ -1,3 +1,0 @@
-[submodule "crates/dxbc-spirv-sys/vendor/dxbc-spirv"]
-	path = source/crates/dxbc-spirv-sys/vendor/dxbc-spirv
-	url = https://github.com/doitsujin/dxbc-spirv.git
