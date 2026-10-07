@@ -12,7 +12,7 @@ namespace SkinFusion
 {
     internal sealed class UpdateChecker
     {
-        internal const string CurrentVersion = "1.0.1";
+        internal const string CurrentVersion = "1.0.2";
         private const string Releases = "https://github.com/stereolove33/Zephyr/releases/";
         private Task<object> pending;
         private DateTime checkedAt = DateTime.MinValue;
