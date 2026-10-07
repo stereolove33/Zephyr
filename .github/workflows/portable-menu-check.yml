@@ -1,0 +1,50 @@
+name: Portable Zephyr menu compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'zephyr-app/in-game-source/**'
+      - 'zephyr-app/launcher/**'
+      - 'zephyr-app/ui/**'
+      - '.github/workflows/portable-menu-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+      - name: Build current portable menu and verify loader export
+        shell: pwsh
+        run: |
+          $out = "$env:GITHUB_WORKSPACE/menu-build/"
+          & msbuild.exe zephyr-app/in-game-source/R3nzSkin/R3nzSkin.vcxproj /m /p:Configuration=RiotGamesServers /p:Platform=x64 "/p:OutDir=$out" /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Menu compilation failed' }
+          $exports = & dumpbin.exe /exports menu-build/R3nzSkin.dll
+          if ($LASTEXITCODE -ne 0 -or -not ($exports -match '\bNextHook\s*$')) { throw 'Required NextHook export missing' }
+          Get-FileHash menu-build/R3nzSkin.dll -Algorithm SHA256 | Format-List
+      - name: Build portable launcher
+        shell: cmd
+        run: zephyr-app\BUILD-LAUNCHER.cmd
+      - name: Run interface regression tests
+        shell: pwsh
+        run: |
+          node --test zephyr-app/ui/*.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Interface tests failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zephyr-menu-build-${{ github.sha }}
+          path: menu-build/R3nzSkin.dll
+          if-no-files-found: error
