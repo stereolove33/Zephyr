@@ -1,329 +1,2052 @@
-#pragma warning(disable : 6011)
-
-#include <Windows.h>
-#include <ShlObj.h>
-#include <cinttypes>
-#include <filesystem>
-#include <string>
-
-#include "fnv_hash.hpp"
-#include "imgui/imgui.h"
-#include "imgui/imgui_impl_dx11.h"
-#include "imgui/imgui_impl_win32.h"
-#include "vmt_smart_hook.hpp"
-
-#include "CheatManager.hpp"
-#include "Hooks.hpp"
-#include "ZephyrTheme.hpp"
-#include "Memory.hpp"
-#include "SDK/AIBaseCommon.hpp"
-#include "SDK/GameState.hpp"
-
-LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-static inline void testFunc() noexcept
-{
-	// The codes you write here are executed when you press the F7 key in the game.
-	
-	// Example Func
-	const auto minions{ cheatManager.memory->minionList };
-	for (auto i{ 0u }; i < minions->length; ++i) {
-		const auto minion{ minions->list[i] };
-		const auto owner{ minion->getGoldRedirectTarget() };
-		cheatManager.logger->addLog("Minion: %s\n\tModelName: %s\n\t", minion->get_name()->c_str(), minion->get_character_data_stack()->base_skin.model.str);
-		if (owner)
-			cheatManager.logger->addLog("OwnerName: %s\n\t\tModelName: %s\n\t", owner->get_name()->c_str(), owner->get_character_data_stack()->base_skin.model.str);
-		cheatManager.logger->addLog("IsLaneMinion: %d\n\t", minion->isLaneMinion());
-		cheatManager.logger->addLog("IsEliteMinion: %d\n\t", minion->isEliteMinion());
-		cheatManager.logger->addLog("IsEpicMinion: %d\n\t", minion->isEpicMinion());
-		cheatManager.logger->addLog("IsMinion: %d\n\t", minion->isMinion());
-		cheatManager.logger->addLog("IsJungle: %d\n\n", minion->isJungle());
-	}
-}
-
-static LRESULT WINAPI wndProc(const HWND window, const UINT msg, const WPARAM wParam, const LPARAM lParam) noexcept
-{
-	if (ImGui_ImplWin32_WndProcHandler(window, msg, wParam, lParam))
-		return true;
-
-	if (msg == WM_KEYDOWN) {
-		if (wParam == cheatManager.config->menuKey.getKey()) {
-			cheatManager.gui->is_open = !cheatManager.gui->is_open;
-			if (!cheatManager.gui->is_open)
-				cheatManager.config->save();
-		} else if (wParam == 0x35) {
-			const auto player{ cheatManager.memory->localPlayer };
-			if (const auto player{ cheatManager.memory->localPlayer }; (::GetAsyncKeyState(VK_LCONTROL) & 0x8000) && player) {
-				const auto playerHash{ fnv::hash_runtime(player->get_character_data_stack()->base_skin.model.str) };
-				if (const auto it{ std::ranges::find_if(cheatManager.database->specialSkins,
-				    [&skin = player->get_character_data_stack()->base_skin.skin, &ph = playerHash](const SkinDatabase::specialSkin& x) noexcept -> bool
-				    {
-						return x.champHash == ph && (x.skinIdStart <= skin && x.skinIdEnd >= skin);
-				    })}; it != cheatManager.database->specialSkins.end())
-				{
-					const auto stack{ player->get_character_data_stack() };
-					if (stack->base_skin.gear < static_cast<std::int8_t>(it->gears.size()) - 1)
-						++stack->base_skin.gear;
-					else
-						stack->base_skin.gear = static_cast<std::int8_t>(0);
-
-					stack->update(true);
-				}
-			}
-		} else if (wParam == cheatManager.config->nextSkinKey.getKey() && cheatManager.config->quickSkinChange) {
-			if (const auto player{ cheatManager.memory->localPlayer }; player) {
-				const auto& values{ cheatManager.database->champions_skins[fnv::hash_runtime(player->get_character_data_stack()->base_skin.model.str)] };
-				if (++cheatManager.config->current_combo_skin_index > static_cast<std::int32_t>(values.size()))
-					cheatManager.config->current_combo_skin_index = static_cast<std::int32_t>(values.size());
-				if (cheatManager.config->current_combo_skin_index > 0)
-					player->change_skin(values[cheatManager.config->current_combo_skin_index - 1].model_name, values[cheatManager.config->current_combo_skin_index - 1].skin_id);
-				cheatManager.config->save();
-			}
-		} else if (wParam == cheatManager.config->previousSkinKey.getKey() && cheatManager.config->quickSkinChange) {
-			if (const auto player{ cheatManager.memory->localPlayer }; player) {
-				const auto& values{ cheatManager.database->champions_skins[fnv::hash_runtime(player->get_character_data_stack()->base_skin.model.str)] };
-				if (--cheatManager.config->current_combo_skin_index > 0)
-					player->change_skin(values[cheatManager.config->current_combo_skin_index - 1].model_name, values[cheatManager.config->current_combo_skin_index - 1].skin_id);
-				else
-					cheatManager.config->current_combo_skin_index = 1;
-				cheatManager.config->save();
-			}
-		} else if (wParam == VK_F7) {
-			testFunc();
-		}
-	}
-
-	return ::CallWindowProc(originalWndProc, window, msg, wParam, lParam);
-}
-
-std::once_flag init_device;
-std::unique_ptr<::vmt_smart_hook> swap_chain_vmt{ nullptr };
-
-static const ImWchar tahomaRanges[] = {
-	0x0020, 0x00FF, // Basic Latin + Latin Supplement
-	0x0100, 0x024F, // Latin Extended-A + Latin Extended-B
-	0x0250, 0x02FF, // IPA Extensions + Spacing Modifier Letters
-	0x0300, 0x03FF, // Combining Diacritical Marks + Greek/Coptic
-	0x0400, 0x052F, // Cyrillic + Cyrillic Supplement
-	0x0530, 0x06FF, // Armenian + Hebrew + Arabic
-	0x0E00, 0x0E7F, // Thai
-	0x1E00, 0x1FFF, // Latin Extended Additional + Greek Extended
-	0x2000, 0x20CF, // General Punctuation + Superscripts and Subscripts + Currency Symbols
-	0x2100, 0x218F, // Letterlike Symbols + Number Forms
-	0,
-};
-
-namespace d3d_vtable {
-	ID3D11Device* d3d11_device{ nullptr };
-	ID3D11DeviceContext* d3d11_device_context{ nullptr };
-	ID3D11RenderTargetView* main_render_target_view{ nullptr };
-	IDXGISwapChain* p_swap_chain{ nullptr };
-
-	static void WINAPI create_render_target() noexcept
-	{
-		ID3D11Texture2D* back_buffer{ nullptr };
-		p_swap_chain->GetBuffer(0u, IID_PPV_ARGS(&back_buffer));
-
-		if (back_buffer) {
-			d3d11_device->CreateRenderTargetView(back_buffer, nullptr, &main_render_target_view);
-			back_buffer->Release();
-		}
-	}
-
-	static void init_imgui(IDXGISwapChain* device) noexcept
-	{
-		cheatManager.database->load();
-		cheatManager.logger->addLog("All skins loaded from memory!\n");
-		ImGui::CreateContext();
-		auto& style{ ImGui::GetStyle() };
-
-		style.WindowPadding = ImVec2(6.0f, 6.0f);
-		style.FramePadding = ImVec2(6.0f, 4.0f);
-		style.ItemSpacing = ImVec2(6.0f, 4.0f);
-		style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
-
-		style.ScrollbarSize = 12.0f;
-
-		style.WindowBorderSize = 0.5f;
-		style.ChildBorderSize = 0.5f;
-		style.PopupBorderSize = 0.5f;
-		style.FrameBorderSize = 0;
-
-		style.WindowRounding = 0.0f;
-		style.ChildRounding = 0.0f;
-		style.FrameRounding = 0.0f;
-		style.ScrollbarRounding = 0.0f;
-		style.GrabRounding = 0.0f;
-		style.TabRounding = 0.0f;
-		style.PopupRounding = 0.0f;
-
-		style.AntiAliasedFill = true;
-		style.AntiAliasedLines = true;
-
-		ApplyZephyrTheme();
-
-		auto& io{ ImGui::GetIO() }; (void)io;
-		io.IniFilename = nullptr;
-		io.LogFilename = nullptr;
-		io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-
-		if (PWSTR pathToFonts; SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_Fonts, 0, nullptr, &pathToFonts))) {
-			const std::filesystem::path path{ pathToFonts };
-			::CoTaskMemFree(pathToFonts);
-			ImFontConfig cfg;
-			cfg.SizePixels = 15.0f;
-			io.Fonts->AddFontFromFileTTF((path / "tahoma.ttf").string().c_str(), cfg.SizePixels, &cfg, tahomaRanges);
-			cfg.MergeMode = true;
-			io.Fonts->AddFontFromFileTTF((path / "malgun.ttf").string().c_str(), cfg.SizePixels, &cfg, io.Fonts->GetGlyphRangesKorean());
-			io.Fonts->AddFontFromFileTTF((path / "msyh.ttc").string().c_str(), cfg.SizePixels, &cfg, io.Fonts->GetGlyphRangesChineseFull());
-			cfg.MergeMode = false;
-			cheatManager.logger->addLog("Fonts loaded!\n");
-		}
-
-		ImGui_ImplWin32_Init(cheatManager.memory->window);
-
-		p_swap_chain = device;
-		p_swap_chain->GetDevice(__uuidof(d3d11_device), reinterpret_cast<void**>(&(d3d11_device)));
-		d3d11_device->GetImmediateContext(&d3d11_device_context);
-		create_render_target();
-		::ImGui_ImplDX11_Init(d3d11_device, d3d11_device_context);
-		::ImGui_ImplDX11_CreateDeviceObjects();
-
-		originalWndProc = WNDPROC(::SetWindowLongPtr(cheatManager.memory->window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&wndProc)));
-		cheatManager.logger->addLog("WndProc hooked!\n\tOriginal: 0x%X\n\tNew: 0x%X\n", &originalWndProc, &wndProc);
-	}
-
-	static void render() noexcept
-	{
-		const auto client{ cheatManager.memory->client };
-		if (client && client->game_state == GGameState_s::Running) {
-			cheatManager.hooks->init();
-			if (cheatManager.gui->is_open) {
-				::ImGui_ImplDX11_NewFrame();
-				::ImGui_ImplWin32_NewFrame();
-				ImGui::NewFrame();
-				cheatManager.gui->render();
-				ImGui::EndFrame();
-				ImGui::Render();
-				d3d11_device_context->OMSetRenderTargets(1, &main_render_target_view, nullptr);
-				::ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-			}
-		}
-	}
-
-
-	struct dxgi_present {
-		static long WINAPI hooked(IDXGISwapChain* p_swap_chain, UINT sync_interval, UINT flags) noexcept
-		{
-			std::call_once(init_device, [&]() { init_imgui(p_swap_chain); });
-			render();
-			return m_original(p_swap_chain, sync_interval, flags);
-		}
-		static decltype(&hooked) m_original;
-	};
-	decltype(dxgi_present::m_original) dxgi_present::m_original;
-
-	struct dxgi_resize_buffers {
-		static long WINAPI hooked(IDXGISwapChain* p_swap_chain, UINT buffer_count, UINT width, UINT height, DXGI_FORMAT new_format, UINT swap_chain_flags) noexcept
-		{
-			if (main_render_target_view) { main_render_target_view->Release(); main_render_target_view = nullptr; }
-			const auto hr{ m_original(p_swap_chain, buffer_count, width, height, new_format, swap_chain_flags) };
-			create_render_target();
-			return hr;
-		}
-		static decltype(&hooked) m_original;
-	};
-	decltype(dxgi_resize_buffers::m_original) dxgi_resize_buffers::m_original;
-};
-
-static void changeModelForObject(const AIBaseCommon* obj, const char* model, const std::int32_t skin) noexcept
-{
-	if (skin == -1)
-		return;
-
-	if (const auto stack{ obj->get_character_data_stack() }; stack->base_skin.skin != skin) {
-		stack->base_skin.skin = skin;
-		stack->stack.clear();
-		stack->push(model, skin);
-	}
-}
-
-static void changeSkinForObject(const AIBaseCommon* obj, const std::int32_t skin) noexcept
-{
-	if (skin == -1)
-		return;
-
-	if (const auto stack{ obj->get_character_data_stack() }; stack->base_skin.skin != skin) {
-		stack->base_skin.skin = skin;
-		stack->update(true);
-	}
-}
-
-void Hooks::init() noexcept
-{
-	const auto player{ cheatManager.memory->localPlayer };
-	const auto heroes{ cheatManager.memory->heroList };
-	const auto minions{ cheatManager.memory->minionList };
-	static const auto playerHash{ player ? fnv::hash_runtime(player->get_character_data_stack()->base_skin.model.str) : 0u };
-
-	std::call_once(change_skins, [&]() noexcept -> void {
-		if (player) {
-			if (cheatManager.config->current_combo_skin_index > 0) {
-				const auto& values{ cheatManager.database->champions_skins[fnv::hash_runtime(player->get_character_data_stack()->base_skin.model.str)] };
-				player->change_skin(values[cheatManager.config->current_combo_skin_index - 1].model_name, values[cheatManager.config->current_combo_skin_index - 1].skin_id);
-			}
-		}
-
-		const auto my_team{ player ? player->get_team() : 1 };
-		for (auto i{ 0u }; i < heroes->length; ++i) {
-			const auto hero{ heroes->list[i] };
-			if (hero == player)
-				continue;
-
-			const auto champion_name_hash{ fnv::hash_runtime(hero->get_character_data_stack()->base_skin.model.str) };
-			if (champion_name_hash == FNV("PracticeTool_TargetDummy"))
-				continue;
-
-			const auto is_enemy{ my_team != hero->get_team() };
-			const auto& config_array{ is_enemy ? cheatManager.config->current_combo_enemy_skin_index : cheatManager.config->current_combo_ally_skin_index };
-			const auto config_entry{ config_array.find(champion_name_hash) };
-			if (config_entry == config_array.end())
-				continue;
-
-			if (config_entry->second > 0) {
-				const auto& values = cheatManager.database->champions_skins[champion_name_hash];
-				hero->change_skin(values[config_entry->second - 1].model_name, values[config_entry->second - 1].skin_id);
-			}
-		}
-	});
-
-	for (auto i{ 0u }; i < heroes->length; ++i) {
-		if (const auto hero{ heroes->list[i] }; !hero->get_character_data_stack()->stack.empty()) {
-			// Viego transforms into another champion as 2nd form, our own skin's id may not match for every champion. (same problem exists in sylas) 
-			if (const auto championName{ fnv::hash_runtime(hero->get_character_data_stack()->base_skin.model.str) }; championName == FNV("Viego") || championName == FNV("Sylas"))
-				continue;
-
-			if (auto& stack{ hero->get_character_data_stack()->stack.front() }; stack.skin != hero->get_character_data_stack()->base_skin.skin) {
-				stack.skin = hero->get_character_data_stack()->base_skin.skin;
-				hero->get_character_data_stack()->update(true);
-			}
-		}
-	}
-
-	for (auto i{ 0u }; i < minions->length; ++i) {
-		const auto minion{ minions->list[i] };
-
-		if (minion->isLaneMinion() && cheatManager.config->current_minion_skin_index != -1) {
-			if (player && player->get_team() == 2)
-				changeSkinForObject(minion, cheatManager.config->current_minion_skin_index * 2 + 1);
-			else
-				changeSkinForObject(minion, cheatManager.config->current_minion_skin_index * 2);
-			continue;
-		}
-
-		const auto hash{ fnv::hash_runtime(minion->get_character_data_stack()->base_skin.model.str) };
-
-		if (const auto owner{ minion->getGoldRedirectTarget() }; owner) {
+41195a71527385fc685d5efc7295432a6a39030c497b17186929b9f3f46577b2  .gitignore
+4b02417d78ab6b014d1ccb53ca3672e9b0f37fb2092d7f3b6e81a7ef032791fc  BUILD-LAUNCHER.cmd
+032b64c3337ed6324b24096cce2b2a20a5b6a991d2b80136023314cfffd9518d  BUILD.cmd
+7c7aef724f454aefaa0f60c66c7b90514edc77a9d8d0b24fd511703c20717a46  BUILD.ps1
+68276bb11d7b819253fc514f8d2811c0fe02363225cb48cb394233f3edb90413  BUILDING.md
+b3b72c7cbbffb251add877ed30b3386d4c65f1b45914e012b7a7738a406e0fb5  INSTALL-WEBVIEW2.cmd
+349b83b585148029efb688f45ecf37f9d7036f53a0f2b94c9d0874b6c35aaabc  INSTALL-WEBVIEW2.ps1
+76071db170534f67790638b7cd94a681bfccedf09c4d51f7ea1dad67efc35841  README.md
+e89dbec188156defd3ae128fb5aad55da1e2287f85ea8c3933c1feed238511af  RELEASE-NOTES.md
+fd525af27a820bccf27712acd77147fc21145e73c363b65f08557b0ec82493ee  VERIFY-ORIGINALS.ps1
+0e57781d0db2b92173a76f00591f368906b48e98e2ba72f92b0d28d93335ad9c  addon/SkinFusion.exe.config
+f4f98851484c2460739f41e5d2ba6924bbefe7dfe763681fa49bcc0e58ff836a  addon/SkinFusionMenu.cs
+22052752d9469b3e8eda66eb05c5b5704cc8cf60d055387db339c56ec90bcdfc  addon/UpdateChecker.cs
+62a0c752b5fe8bfbe658e4f50d65d51348e6231f2a3ff4958f2075c3395ee009  addon/ZephyrMenu.cs
+0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55  addon/webview2/LICENSE.txt
+6cda3d618e6d4eca63988bc48b9a4b75a00b6950d120f981a4ced20f796a483f  addon/webview2/VERSION.txt
+693c3880eee9cd0b1c5248dacdcd0558240dda5ddc390c905ee314b4b1119a00  customized/menu-sha256.json
+2432d5e53156b2e365d202c18d986553a7c8c40219bbffe58bbbb54335af1d99  in-game-source/.gitattributes
+a026a469d9fcce6146e91b4a97e2d46b3730349c650b37c89ac17d5ea1467c95  in-game-source/.github/workflows/windows.yml
+9c99f6f28aa89ab984a93fb86ec9c8987ca30d21c6406acee959760a4f471ccb  in-game-source/.gitignore
+1c65ee0f7984f6161797ed3e3d51d8185c09cf78317a6d95982c3b5a2e82305c  in-game-source/LICENSE
+4d9cef8103edf97efef5aab977cf9742ee0cfa0d2385584adef5016d932da48a  in-game-source/PythonScripts/lolskin_to_skin.py
+1ad93db38640ad2f541e874b92ad340571ada74541d722fdafcf318f4776b452  in-game-source/R3nzSkin.sln
+97fed557b4b7000536a3e803c247f07c3d779aac23d8099123e8c690d0bcd8a7  in-game-source/R3nzSkin/CheatManager.hpp
+655500c96018b27c7fd22793382242e797889c2078e5928ece4d41a48966ba11  in-game-source/R3nzSkin/Config.cpp
+89ae9d2a8d1a3312cd5d3300b7d43e069611c511489b3647db5d9c9bed0d9e58  in-game-source/R3nzSkin/Config.hpp
+31f09c81d08e8a1706d88ea3388636f0dc3362151b0e601ad722a1e530830e0a  in-game-source/R3nzSkin/GUI.cpp
+c3b5f4a373a39bc3e79cebb0afa524833d57c64e74806eb5f4b022645165e4b3  in-game-source/R3nzSkin/GUI.hpp
+a2d2fc4829db8131c2e2e7ffbfa5d1f8bf59f383686f7a609c9b537867fa28b2  in-game-source/R3nzSkin/Hooks.cpp
+33c85803b7ceb850c75aa04ce4e1028510761d1c31fda172629924cbfcabd923  in-game-source/R3nzSkin/Hooks.hpp
+f0b4ef0270be306ff241e3c8cd3c91c9fa05ae0e14d1a2b702d0dc8f0cecaafd  in-game-source/R3nzSkin/Logger.hpp
+69848b436eb14096b4236d85afb7edd7a2c0350a1774643b63b2533486689651  in-game-source/R3nzSkin/R3nzSkin.cpp
+b776df473645f893638f9f3de0aa1501eaf1eadd4e7c7aca20cec43b9a225119  in-game-source/R3nzSkin/R3nzSkin.rc
+57e5acdc672c0bf6af0d2302e73a70254b010ccac609fee6f9a7795091e9d72c  in-game-source/R3nzSkin/R3nzSkin.vcxproj
+18cbcfd7ae8edeb853a9d21e820193e5e61e7900f00eaa210a02d717d1cbfce6  in-game-source/R3nzSkin/R3nzSkin.vcxproj.filters
+5a6ad8a599a09d311b761833c2c843b83eb9f5d2170ed14ccd751991bf45519b  in-game-source/R3nzSkin/SDK/AIBaseCommon.cpp
+7a00bb23bb314875676f370a4a9aea1eb304da786ad8472f189560f146f5eab5  in-game-source/R3nzSkin/SDK/AIBaseCommon.hpp
+8bc792ee700110eae288da23d3c3731c58433ca6e3a7506bc0342e203566d532  in-game-source/R3nzSkin/SDK/AIHero.hpp
+17e44fdbde76c4d372c54a165f4b3be8b1e22d6a14d93db2b492168695e0bba5  in-game-source/R3nzSkin/SDK/AIMinionClient.cpp
+c774b603992ca6a89e532dc79952f4733fd37f976ea2c2d9675923af639f38d1  in-game-source/R3nzSkin/SDK/AIMinionClient.hpp
+cfe450ee5532fa92ca825b1bf44749203ba889219118a280092ac1157cfe0c44  in-game-source/R3nzSkin/SDK/AITurret.hpp
+234935fdb37990778658d6b43ed90c73de94fbe967d62784200bc6bf089cce09  in-game-source/R3nzSkin/SDK/AString.hpp
+fe8c9b2c367d38d180f9193baaf3a227925bb135794765d9a1c68ee70e6c1683  in-game-source/R3nzSkin/SDK/Champion.hpp
+9f0e250ec10ba4313492a8c4c1d52c17be33b576a29ecb5eaaaa0929b729c12f  in-game-source/R3nzSkin/SDK/ChampionManager.hpp
+7c58138b5173a16fd1365abdd7102aa601487712251dd0dd46e2e39e1aadd61d  in-game-source/R3nzSkin/SDK/CharacterDataStack.cpp
+f7d728cca7164acbbc619c9a773530dbf2a756da9756c0b220524d9dcbf89691  in-game-source/R3nzSkin/SDK/CharacterDataStack.hpp
+3e8d7cd012dcbc1eacc2ffef8e49fbe0a4701abcde5683130a5c65058b83e97a  in-game-source/R3nzSkin/SDK/CharacterStackData.hpp
+333657299194d39dd0012e7c9ced9a03066a8a6becbe05d9d34a16523ca6fa19  in-game-source/R3nzSkin/SDK/GameClient.hpp
+da112138fb721a6189c830b93e4a3b496034fe948b936567877fc9326b7b5845  in-game-source/R3nzSkin/SDK/GameObject.hpp
+df0a7dddcd1ca952af1e8ff6dc53ca0645226cd278e6d8d7e4da81214089f49b  in-game-source/R3nzSkin/SDK/GameState.hpp
+e25ce17d1ba48b60710d774c9f78aabec3f0d5a714e30f1cb3bb6ad60c3cd123  in-game-source/R3nzSkin/SDK/ManagerTemplate.hpp
+5e91b89077621c6913596d4f5612b9f05359236453b2e724367771faf8b8fa97  in-game-source/R3nzSkin/SDK/Pad.hpp
+30f8ab675e23c5fccfcc1c08dc89c17bcbefb26d9200bbe78b3874ad447caddb  in-game-source/R3nzSkin/SDK/RiotArray.hpp
+d6239342e4210eb7cb1c0960c8178e2b65912826b6e809b4f64e05caf83370a1  in-game-source/R3nzSkin/SDK/Skin.hpp
+f74a9f917a755230615e8a26c9a72cfc1b3ce3a39e90f87a2240279f820dacc1  in-game-source/R3nzSkin/SkinDatabase.cpp
+49353b1b5f1a073f442999aa04bcb58e9265666718e8d566501f16469f7052ff  in-game-source/R3nzSkin/SkinDatabase.hpp
+949beee466e6069493378e994ab203157e35ef0e323217c79c3377793c14d0d3  in-game-source/R3nzSkin/Utils.cpp
+c9cf3d54cd55753d92207245dc9cd2a43d0cf0df1724c3a29422a1d5159afaab  in-game-source/R3nzSkin/Utils.hpp
+9b9201f491c5cbef9bea29231045f27e784cd350b07dbb3afc4340716695d9b4  in-game-source/R3nzSkin/ZephyrHook.cpp
+e05d5c6b9e6d6fe785bbece0c56a7b789f64d88a830f4fcd4d5837bcac4bc6c7  in-game-source/R3nzSkin/ZephyrTheme.hpp
+2efa590fed1b7976d6ad48e50395577fccb54f39a728217555a2332a7d0b8409  in-game-source/R3nzSkin/encryption.hpp
+2d802122f74650aff184ef760c950c7e95cd45ab90eaaac8a777d0f25564ee52  in-game-source/R3nzSkin/fnv_hash.hpp
+b2d4a8b41a079da7e1da63530be4dfecd8c55294cbcf6c282f15ada3a682e490  in-game-source/R3nzSkin/imgui/imconfig.h
+064c3f190ebbc823aeb5d8e52807132ab93a0ac27411f15edd77bff6a799ce67  in-game-source/R3nzSkin/imgui/imgui.cpp
+4e76960cc5de7584c29bd6b61d5d522401a3779061964f8cd0ccadc101fe09f4  in-game-source/R3nzSkin/imgui/imgui.h
+ee23d860066323badf75b2fe4a3e0ae2739c11971d5c5b304ac60274e13dbfe2  in-game-source/R3nzSkin/imgui/imgui_demo.cpp
+808c353df106f2cd572fd1f8e0a670ff3ab69caf9adfad22de2471526bed5c36  in-game-source/R3nzSkin/imgui/imgui_draw.cpp
+b63ece5d10d9ece7ff16b9f4b190f81b3289a8c095edf2ae006eb5c6e1ad89ab  in-game-source/R3nzSkin/imgui/imgui_impl_dx11.cpp
+ac65ad578385fbc45800bb70b144f76cbe2d78a83199d199ef0bf25e7a065005  in-game-source/R3nzSkin/imgui/imgui_impl_dx11.h
+6d575828a6aae35646a3dcd5d5926ddccd7baa38b6fce7883afcb21433159bfd  in-game-source/R3nzSkin/imgui/imgui_impl_win32.cpp
+34b91e5a6753efd13b38fa05103e599cb5df2b2a78f94ab07104160c91f48058  in-game-source/R3nzSkin/imgui/imgui_impl_win32.h
+c991ca24ea2b8f728557cb572f52acd567a7accc6c23717c5ae69f830feadf54  in-game-source/R3nzSkin/imgui/imgui_internal.h
+7e503407c3eed64860b6fd8446200afd2ee3f80ba73723987bc8792e1336740d  in-game-source/R3nzSkin/imgui/imgui_tables.cpp
+0c2e945eca92b67f7f36d3ca479e7224e2ccfb1ca7a1c859c872aec79640f1e1  in-game-source/R3nzSkin/imgui/imgui_widgets.cpp
+a53bcd85861ff53ca1526407db1f6fd2ad619636327dcf1e6318f33e545068dd  in-game-source/R3nzSkin/imgui/imstb_rectpack.h
+686a603897d8ff024fd7dbc4bfe582ebb66b4581b89b084d69f899a9076847d2  in-game-source/R3nzSkin/imgui/imstb_textedit.h
+87345e551d9f0060f7551c804fe7ed02e57580c0a22f979442660e2781a973b4  in-game-source/R3nzSkin/imgui/imstb_truetype.h
+ad386ccaeed3c0534c097d17232b061a1961c93fb76650ed2adf15acc4d2e729  in-game-source/R3nzSkin/json/json.hpp
+6b7b83886d3d296e014f92a5d57c5a178c5f6174a08da480d90352e1860d9549  in-game-source/R3nzSkin/memory.cpp
+b61a94b885503d4d184b6ac9b98573e38f57b5d51ce6f9a3cc386c7850cdedca  in-game-source/R3nzSkin/memory.hpp
+6df543b81524a2e29e2b1fc45bbb3294a392c52748dc7bfcaaec1c42bc813e88  in-game-source/R3nzSkin/offsets.hpp
+aa54f3b0dbb7c0bdbfc7e1f9bca9d43e389001f77d7250ee7f016faefa097baa  in-game-source/R3nzSkin/resource.h
+b0761ed380703b99a38e3522231b35d7f7050e833c6343ff24c51696419f311b  in-game-source/R3nzSkin/vmt_smart_hook.hpp
+e7dd50129386d6e3b722e5e71946ad6b0afebd8ad37775d0eb7b00c2c63821aa  in-game-source/R3nzSkin_Injector/Injector.cpp
+8497eeedf67e922f49a8a0a826f208ff6884caecb5407365016c3e8a0c8ca158  in-game-source/R3nzSkin_Injector/Injector.hpp
+d3361171e92a2569d3de865fd2fab014c8e9a353126c5ea24032e084d38e3d88  in-game-source/R3nzSkin_Injector/R3nzSkin_Injector.rc
+1caf92e10c96a6f7b0f7f34fb595746bd276b5ba3912791c9ddc396212e3b2e3  in-game-source/R3nzSkin_Injector/R3nzSkin_Injector.vcxproj
+0bf94650f26bbdb40d99395beb4e118df2cc04715644f378790ce32d7129e665  in-game-source/R3nzSkin_Injector/R3nzSkin_Injector.vcxproj.filters
+d492ed21dccaabedc8885765c467865b74a777ff2945f7081a812ca38c413a33  in-game-source/R3nzSkin_Injector/R3nzUI.hpp
+2f38d6c8c78501d9b583bf811f67145811c7fe6939b82d487563cdbea7b1d4e8  in-game-source/R3nzSkin_Injector/R3nzUI.resx
+36a3dec4e90f917e9c52964142281329743391104bad2b8c80a097c538df1b41  in-game-source/R3nzSkin_Injector/icon.ico
+94fc55de0c0ae34ca6734ca84fb51144257a31db0990db7b637f2da40a540d52  in-game-source/R3nzSkin_Injector/lazy_importer.hpp
+b44033cdadd887b0846ad53e411c8463be4092986af51d0b35bd4ae21533641b  in-game-source/R3nzSkin_Injector/main.cpp
+44c1dc74e2a3edde2517e4c89c05de8519ee5cb0ff8df7a85e89e3ba5230729a  in-game-source/R3nzSkin_Injector/resource.h
+22dabbed96c9b611d29f70d24db7696ad1cf2552ca58d9f6c3e946bf208c932f  in-game-source/R3nzSkin_Injector/xorstr.hpp
+d354f6f597add9de7c8c21416bfd5f46bcb1d1bbaa265e5381cdf1cafa4bc98d  in-game-source/README.md
+3eba057ac3281177a9c113b2e91b6dea8ccb2438f0b19d9a71aa4f745221d3c1  in-game-source/README_zh.md
+99bd4a2cdb0e9b18bf247bbf53c637c937e425ffe8705f600749639db7a6dd85  launcher/ZephyrLauncher.cs
+47c0dacebca9f56c9020b68584470dfc51f07650a3719904e98f4b447a5dd003  ltk/.codegraph/.gitignore
+01549e61e17063e7ec897f3b1b2235394e0667751fb2b52fd9367faa09ffe231  ltk/.cursor/rules/error-handling.mdc
+5219315c2627967948254dcfbeeb4afbbdbb9cf7b29f720745b52f225d17a1fd  ltk/.cursor/rules/frontend-guidelines.mdc
+06c51a659482ce4e4852c2998e6faa52b8c326dfc2aa7d616897a9c89a818fe4  ltk/.editorconfig
+7f2cf03561994347cb9e07b030521d928410da50d12d4e318144275a9c3c1dba  ltk/.env.example
+d620878e7a7f5eaad864d74bc7a3cac5b446aca4f69ee3ffadb249768c066cae  ltk/.gitattributes
+e28d113107bd54a5be969e7f762f610f0ae465cbd506e6f9caed386ff06952bc  ltk/.github/ISSUE_TEMPLATE/bug_report.yml
+ba01a5fb6d3254976a10a4d57556d6825bad38b7e98c12e38b0a212a3ba4bf5d  ltk/.github/ISSUE_TEMPLATE/feature_request.yml
+14e5ef7d1a0de4e5a25cf8133b20728c40af8865c02f75a76c9a548799c13553  ltk/.github/workflows/ci.yml
+eb70d19a930e9b0f8e2866d762b0c38f373d653e58f5785e7f4f9c15353fcd4b  ltk/.github/workflows/release-prepare.yml
+c3dcdf4fa760a0111b9153f89d5af694c164ab3258b8d761e083917b5e98af57  ltk/.github/workflows/release.yml
+b5db96fc818dbf289fe1e2dd9158a9270048f3d278fa7bb10015d708995c880d  ltk/.gitignore
+b775fadf7465f5746e890fe8a0c00760cb765ee6b9080c7dbc57b752dd79e619  ltk/.gitmodules
+e2b7c9733375d7182af2033bda9a7d2a05d0db5eef5be53d26eb7b5f3df8fbc3  ltk/.husky/pre-commit
+068cd69be406c221b652c05310455b27efff5cac694770fcecf012e857d3f124  ltk/.oxfmtrc.json
+85f41d577d6e0b12bfa8bc69ad7f08c3db41b0961646e01064cf968549d59a26  ltk/.oxlintrc.json
+c5a406abfb481ac3b45cc3a5088d49d94ff013169ce6ba1789f31fd5f3c721ee  ltk/.specify/extensions.yml
+34b7c131f4575de0fc3027c8fb310f3dc17d7ca22c9c56e753980aa7c8a30e9f  ltk/.specify/extensions/.registry
+027c6dbdbc06540f1bdc40eab7d09fead235a1d9a2b112525d75837264274124  ltk/.specify/extensions/git/README.md
+9db6713c0688a02bd26c47947b73c4b87ed986f127592a8d437dcb858440660b  ltk/.specify/extensions/git/commands/speckit.git.commit.md
+27220b0e574c7dc59ac09f0c0b91763de0f7c647a989530ba0f92834be76b0f1  ltk/.specify/extensions/git/commands/speckit.git.feature.md
+a6e12f98b05e3ea2a457744872f772be33fbf0fc0428774c96ca65956a9a5bb8  ltk/.specify/extensions/git/commands/speckit.git.initialize.md
+8beee0c0123c97dc6c556a265f19b0b3ea7e2587d197b4ae420f85dd4c7ed7c6  ltk/.specify/extensions/git/commands/speckit.git.remote.md
+56d5588b74d853a0260e04cb3855f7f32ca661b6f46ed9766c01cf28b20b297b  ltk/.specify/extensions/git/commands/speckit.git.validate.md
+d07938ce94303be1c8afac77d4b0ea84654f811490850e744f8ee3021b59f8e3  ltk/.specify/extensions/git/config-template.yml
+9731aa8143a72fbebfdb440f155038ab42642517c2b2bdbbf67c8fdbe076ed79  ltk/.specify/extensions/git/extension.yml
+d07938ce94303be1c8afac77d4b0ea84654f811490850e744f8ee3021b59f8e3  ltk/.specify/extensions/git/git-config.yml
+e12ff0e010c8864942c  ltk/crates/ltk-manager-core/src/meta_schema/game_data.rs
+da61ec811883599f5cb419efa503d04549a027b0b7e83d374cb6b5e9ba540cea  ltk/crates/ltk-manager-core/src/meta_schema/names.rs
+ca95aef23096d6e75a14a469073a6398571fbbb58307ae1dc04f60152308ba50  ltk/crates/ltk-manager-core/src/meta_schema/schema-snapshot.json.gz
+2a3006ae4188da4bcce9c1d003b6f0409f352d1cd6774eeaa82ab6b4de558bb9  ltk/crates/ltk-manager-core/src/meta_schema/tests.rs
+1dbcb183b4e347f044af3e371051a03efd12dee724897558c27bd765e5083b1c  ltk/crates/ltk-manager-core/src/mods/analysis/categorize.rs
+7a9f4a8fb187809d02319f3144e5651c33b5a3519d21fcd9ae54dfd365c025ab  ltk/crates/ltk-manager-core/src/mods/analysis/checksum_mismatches.rs
+7aed44baadd0ecc0ffef8a4462796b9e6066645b02dfcc10d5b6095cbaf51dba  ltk/crates/ltk-manager-core/src/mods/analysis/checksum_mismatches/tests.rs
+e72e4f167befafad84ddbdbff9532251bc6ad34258b04b139479f901bf153cfd  ltk/crates/ltk-manager-core/src/mods/analysis/linked_bins.rs
+3b3e140427c1d7cb4bf336d384e821c21a4c8270113f52f543d2cacbd4067ae0  ltk/crates/ltk-manager-core/src/mods/analysis/mod.rs
+ae0670e7a25a09b7e36907f3a91c1557931bc226499d525f76196897d322a2ed  ltk/crates/ltk-manager-core/src/mods/analysis/scan.rs
+6fd9f33c0004378be69cbd200ac54ecf0ce08ba97eec05dca27dd32a7b6c2275  ltk/crates/ltk-manager-core/src/mods/analysis/wad_reports.rs
+351669415a0a7a34765af94665741584d8dcd85f621e7145dc8e6003124721ff  ltk/crates/ltk-manager-core/src/mods/archive/documents.rs
+987b5d3aa3f1aeb804a9033329fc3e0c09d23ead1d337b699f92ca77419be2c5  ltk/crates/ltk-manager-core/src/mods/archive/documents/tests.rs
+e9b533cd6c292e73cab8ddceb7444764cc0b2c186f38cbb3c4a6dfeaaaf6e5ed  ltk/crates/ltk-manager-core/src/mods/archive/export.rs
+22c8fa02bbbec66f0af83d02f27c1166e9dbffbf07d91cc8886a61aaacaa458e  ltk/crates/ltk-manager-core/src/mods/archive/export/tests.rs
+b59cff2036f62b8d9ba9082469513d80d5d3c09d948fc38ecf11318481e3021d  ltk/crates/ltk-manager-core/src/mods/archive/install.rs
+1c1a8982f10e4df2649a533dbceccc2ade23ae660f72ece4b54064afc53cd849  ltk/crates/ltk-manager-core/src/mods/archive/install/existing.rs
+d80f6316a709074bf816c5323839d33b3be83feeda17d1f33c11b567a21642e3  ltk/crates/ltk-manager-core/src/mods/archive/install/tests.rs
+e2648a5323e3b8adc15336f79f99a9621869031cf416c8ea060b3116164c81ff  ltk/crates/ltk-manager-core/src/mods/archive/install/update.rs
+f1297405925e019701ea99135a0428d80d31f9addb3c99861776b6e6e11d28e7  ltk/crates/ltk-manager-core/src/mods/archive/metadata.rs
+4e25ae17e227dda5fdb91da53d32c2f6643796c228c186e18b3480d1696970dc  ltk/crates/ltk-manager-core/src/mods/archive/migration.rs
+894fb8b83b84d111cc976e1f2a08d5107c6ffa7868a8a4e9a895f4b74c4036e4  ltk/crates/ltk-manager-core/src/mods/archive/mod.rs
+86df1da07132a65020a0c5a67de934c3d62314ade7cfe09f1fee1f6828cfacda  ltk/crates/ltk-manager-core/src/mods/archive/reader.rs
+f98f6273758e77d16457ddbab92d34bce695277ea996c6a61878c16dda93f37d  ltk/crates/ltk-manager-core/src/mods/archive/repair.rs
+2dda6d79240e2d3f629d06607778a985e81fac95a6173b1aab634aad180ff465  ltk/crates/ltk-manager-core/src/mods/archive/repair/delta.rs
+68e3d7780f135392b49bd40f77457e564352187e78eef0ae3ff005b1b2a89f3d  ltk/crates/ltk-manager-core/src/mods/archive/repair/delta/tests.rs
+12d235d19aa6cdc04a15507de64828a2a899756c7d6976f60ffdfe95f87412e6  ltk/crates/ltk-manager-core/src/mods/archive/repair/tests.rs
+e4628e07f53ba8cc08f2b78b5996cf7cec663130e03d291771a66331979ea5d8  ltk/crates/ltk-manager-core/src/mods/archive/storage.rs
+944f3da78d3c49327f13f870d5610af6031da8b0848beeb1a57fb60ed6aea8cc  ltk/crates/ltk-manager-core/src/mods/archive/storage/tests.rs
+80b66772d86a48809be565e495c6b4fc78adb9185e7fba12ce40e26c7d0d3db8  ltk/crates/ltk-manager-core/src/mods/fantome_layer.rs
+6b9f401379a2b6f44818fe0a7c0d70677da0508aac0f7f343805c3ce81eaf00a  ltk/crates/ltk-manager-core/src/mods/health.rs
+3047f5c4394210108b41d6f7f5ff8be9bb880f4f54ebaab24535c63910032b55  ltk/crates/ltk-manager-core/src/mods/health/sweep.rs
+79d5b30082c5ccbdfcf8ccafbc249359a921f8ee38488e8c890e2f276454c2db  ltk/crates/ltk-manager-core/src/mods/health/sweep/tests.rs
+de410fb81cc2b18106501539c5d40e9f20be6726445de2ca7977027a422fe3ab  ltk/crates/ltk-manager-core/src/mods/health/tests.rs
+0b9b4251135e24b43aa36b837323725e01aa68bc815bdd6c5e6e0ef8d18c0ac7  ltk/crates/ltk-manager-core/src/mods/health/timing.rs
+7d25553f75ae3cd226645081a9a61f39efdf9b0cd8dbbcd40d51c75dce7b9f3b  ltk/crates/ltk-manager-core/src/mods/index/document.rs
+ffac258108673d41948bb1499abb4619bb05c0434bd56939d6ce128eef2551d7  ltk/crates/ltk-manager-core/src/mods/index/document/tests.rs
+305d4cd9cc67e08f7124e8f7349c3a010c5009af925a4504dda30b5ebd6e1f65  ltk/crates/ltk-manager-core/src/mods/index/layout_migration.rs
+76b2f807da134c56ae76b2b2e926daa800c1994528a69d1408e8397d101cfb13  ltk/crates/ltk-manager-core/src/mods/index/layout_migration/tests.rs
+4380c42e2f1157ebaf22800f3f0a05291981ee91b540459f3be7573c1da85761  ltk/crates/ltk-manager-core/src/mods/index/mod.rs
+4bcda942fb2edabab9a9902775cab4783c20efb24bea961b85b8ba6f00096f1c  ltk/crates/ltk-manager-core/src/mods/index/reconcile.rs
+b588a64b96b6e7301912ebeb861df044c6729336004992d27d1ba5f28257f772  ltk/crates/ltk-manager-core/src/mods/index/reconcile/tests.rs
+14497d90e40eceb748a0eb7c13657b93d0965fb9e7a9e7be2a2eeb7ba9cfcd9c  ltk/crates/ltk-manager-core/src/mods/index/schema_migration.rs
+ec85e6d7ca2581f1ea608749dc33d4022861f7a2ae874613c8c92740facd9806  ltk/crates/ltk-manager-core/src/mods/index/schema_migration/tests.rs
+7f8d337b924c39ecc1ac0b09c62b81f558d0af89d95cdfa2d3a05aff8da49542  ltk/crates/ltk-manager-core/src/mods/index/startup.rs
+2ff920cbf903bd5a8f8cb952b5ef6905efe630b19d61c4fe80adf842d74c1d7a  ltk/crates/ltk-manager-core/src/mods/layout.rs
+5d8b5ee6ecfb182e8c30f7c76e40e8161598a9a6abbd9c0160e65e272aa3aa02  ltk/crates/ltk-manager-core/src/mods/library.rs
+ff6018116abdc99d5ed960171d5c60abe52c0f4b51543932de7d601683a63fc2  ltk/crates/ltk-manager-core/src/mods/library/tests.rs
+a514a15f1f595d6f46f45c9d74c373b7e76bd7b3527f6fbf4570f7dd2e503a73  ltk/crates/ltk-manager-core/src/mods/long_paths.rs
+87d673ad6664fcb140856bffb5231b49a8a3f0d6d2acd0934f5f3b25d4d6afca  ltk/crates/ltk-manager-core/src/mods/long_paths/tests.rs
+18703bb03eca2ec451aac656d25dc2ee0bba597a7e01d3cf1d72423e87cc8a0c  ltk/crates/ltk-manager-core/src/mods/mod.rs
+d8be214d09d0bb31c11b657b5ba6130c42f85f9839cbd8c66cfb8570ab7f9207  ltk/crates/ltk-manager-core/src/mods/organize/folders.rs
+b881337705587cef693cbf25c098ec4ec2e724fcbb91c89208ea4941be5c4e95  ltk/crates/ltk-manager-core/src/mods/organize/mod.rs
+e0c4669108fe1d442164fccbf074497579fead75beaf285aa301d3b032c2c186  ltk/crates/ltk-manager-core/src/mods/organize/profiles.rs
+549c91777d25c5a2dca0247dc9ff53716d455f52adc689ff5321b20a7cb6f347  ltk/crates/ltk-manager-core/src/mods/overlay_content.rs
+7f61119b4031e4880fe604d711380ac1aae659d78bb1de65db1d6632385be302  ltk/crates/ltk-manager-core/src/mods/overlay_content/tests.rs
+590d35174f2460d019d8da41b6018a8311ceca9e35ed1a71862e8d8c3b7f17fd  ltk/crates/ltk-manager-core/src/mods/slug.rs
+ab60544514f9d748e4069ec946b9724264f50def49b02dcbda7a00674c4f0692  ltk/crates/ltk-manager-core/src/mods/slug/tests.rs
+800c89c85608f6224fcf4f928cb0db2c9f70c8c562ecc9fdf0dfaee8cdb5cdf1  ltk/crates/ltk-manager-core/src/mods/test_support.rs
+b16781afa0c8e6a3fc31227218716b22e89bffbdd154ac27fca7eb037e23c5e0  ltk/crates/ltk-manager-core/src/mods/types.rs
+8d60724781ef53af1fc862707f6ce8091da198f1756dc949eead21962c8016df  ltk/crates/ltk-manager-core/src/news/announcements.rs
+e9864f99a0311532e52c9f6607a4af3923167ed8a3cf45619bdcd53ff60a5af2  ltk/crates/ltk-manager-core/src/news/announcements/tests.rs
+8230315e23d8d507a5603b112f0bb81136a2729bfa84d472e772052926e77496  ltk/crates/ltk-manager-core/src/news/mod.rs
+12cb771696561c602666231cd6063a878bfae297a43667fea929d29e048b670e  ltk/crates/ltk-manager-core/src/news/notices.rs
+0ef89493680f832789aa1e7483091a4cc76330e037039f3326fbdb34e8bc8983  ltk/crates/ltk-manager-core/src/news/notices/tests.rs
+c8dc9cdb677f0bddd175f304534169effe845c24e926fb6f286ccb22c368294e  ltk/crates/ltk-manager-core/src/object_index.rs
+4fd61785af7c903614d5b1f098fd494279c5560b18fcff5116868bfc3922d201  ltk/crates/ltk-manager-core/src/object_index/browse.rs
+734dc877f7c93942b83fe2ad6f8deace698a1ba07316c96fb2199919aa258db2  ltk/crates/ltk-manager-core/src/object_index/build.rs
+c8c5a237c95f0a04bdfc7ad360187b0001a21a413e327607d4ad63bf0381c4f9  ltk/crates/ltk-manager-core/src/object_index/find.rs
+aa81db58df9e7a545e2745f9539b005f2252d59a85e1a2d17cb072f3c349568d  ltk/crates/ltk-manager-core/src/object_index/names.rs
+708b8eb4549ad6c4be138a7bbaf0fe31096f88e570389e7b3c71149b82d063e4  ltk/crates/ltk-manager-core/src/object_index/references.rs
+ef7db5f0dd2ca4bfb136576bfb25d9685b3fd6efc631812d97262cc0474d1b6a  ltk/crates/ltk-manager-core/src/object_index/search.rs
+edb5f16b3e84b2f229338d6b6a9973d20239fe5086088a90896612b064574fee  ltk/crates/ltk-manager-core/src/object_index/state.rs
+43c1794e87143526a7c70989cd3cca4ae91f4d3cfc1268affdcfc46fa3dc0f49  ltk/crates/ltk-manager-core/src/object_index/tests.rs
+b26050f3d62e25e19e105bf60b836dfb54e66f6ea36147984a3418b25130d247  ltk/crates/ltk-manager-core/src/object_index/tests/browse.rs
+747c18a98a86f7903740c06d9eb090fc9875230d63a097220a4f119faa16a064  ltk/crates/ltk-manager-core/src/object_index/tests/build.rs
+764656d353007fe50b133d2cde2fda0c5e31b1d29302f4ca1bc7ef9fe45a2f7d  ltk/crates/ltk-manager-core/src/object_index/tests/class_reads.rs
+dd3b52ff010c889bbc6db63bdff71e87b2216c9828badcc964e1ba1e953a165b  ltk/crates/ltk-manager-core/src/object_index/tests/declarations.rs
+3b8c5e12be721bd0fb55ebc8e9c54cae8fd037403037a1cddbf10a1563009513  ltk/crates/ltk-manager-core/src/object_index/tests/names.rs
+82f3f110c815f173013dc30faa49480b8e18a88c534936b1477f50e679311bbe  ltk/crates/ltk-manager-core/src/object_index/tests/references.rs
+3556db1952a52acab1c2cd3b6416076b7e2d924c425573b3b617beaf23f94007  ltk/crates/ltk-manager-core/src/object_index/tests/search.rs
+04156a030dbb93f85a0dda957923a1efe1b7d28698df9aea42886fb4c9985da6  ltk/crates/ltk-manager-core/src/object_index/tests/state.rs
+925da4fa6e3000dffba0dab3eab30620a473fa351bf9ca3c95eaca2d8cd0d988  ltk/crates/ltk-manager-core/src/object_index/tests/walk.rs
+a6d6f5d30c25c48c87921336ee9dc4a9f4f105d8d060fe91da6f24ead28068d6  ltk/crates/ltk-manager-core/src/object_index/types.rs
+c8debaf8b3662353b76510e4afbd0fe4b0920aac8f1c3601619dbdb3821ea529  ltk/crates/ltk-manager-core/src/object_index/walk.rs
+738e96960b85725366cb5c1b90c5361236a1ed5db83f192126356afc450be736  ltk/crates/ltk-manager-core/src/object_index/walk/run.rs
+36462b518c8b0252ac443b87e4762d4ebfc6d446f5f7ce381a7b1ab06fea3c31  ltk/crates/ltk-manager-core/src/overlay/artifacts.rs
+d0077bc74632f4beb95e703687fa2b918b239afc32c187a1b5f88b2b9b0fd9fb  ltk/crates/ltk-manager-core/src/overlay/build.rs
+c5da73cf66fb4dce711618e94173b42edbf16958a5b021ed16188508af7e9c6b  ltk/crates/ltk-manager-core/src/overlay/builtin_mods.rs
+514dcfbef7eeab4fa68376dfd875d4e08e72f9c3127d8378edebbf4cfc825837  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/baked_meshes.rs
+da7b449a89c7b53157f0339e111880c38c5e39529a70e104a59f15e270fd1fb1  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/baked_meshes/tests.rs
+ab853219414754e9b6370f8dc9be2968c3c53b96cb481b13e5e2f8a75bbdb514  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/base_skins.rs
+a4d20d571709dde417de27852f297a3871c2e94360cb178f3714ff5d7eab9897  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/game_maps.rs
+8c5c33e426541ad92948c142790e22b7165ad0dce0dff6f5d736474f1393373c  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/game_skins.rs
+4392136c6463e80f8a181532eaa17cf9a659c5e5bf3c4ef2e7f6b01ef05c1c5a  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/map_decorations.rs
+babe4bc09a3527494ab93e9a2f7006dd6c4fc1c7dd3b910dc628e15f62f539ab  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/map_decorations/tests.rs
+a6c30cb3d0773a6c55bd9524eee0d26fdaa6190955e8ba512d0f3d5d168fbe12  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/map_skins.rs
+b95c24ade1a0f2fef467cd2eae8b1e9988d39604a59cc6e7d58c7a38e7e6dfda  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/map_skins/tests.rs
+b13549064b24686d9526e78faeff9f9aea74c67fb2f4aedccd8973d1eea02a9f  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/mod_skins.rs
+fbe406ac79b2613ba785a2de82c0159c8f8189e6bc58cadf71de9b57e042b008  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/overrides.rs
+89fafddc6376b820d68f8fa77895eb1bac717f706a7396f6d23bfa31cd61aedd  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/skin_bin.rs
+2038eebe54ad40d2808570db53bf0172a688db3198178859273a24e5de9ec606  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/stand_in.rs
+f33237275669b662641dee15c194f9f15c4bfe3e22f9f2028b828219dcf41664  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/tests.rs
+86f76ac6510f37cb7de96fce06954fa7611cb5bad5bdaf917964da2e2a73df7f  ltk/crates/ltk-manager-core/src/overlay/builtin_mods/ward_skins.rs
+a493f7d3600031705bf26cc1c5b4df0ac7c425bab186c6ac88b93289853ae60e  ltk/crates/ltk-manager-core/src/overlay/mod.rs
+9b8612401a1d303f81bb4e2dab757255e4b1f6fc2deb1f5ad596f22e954c7fcf  ltk/crates/ltk-manager-core/src/overlay/resolve.rs
+61a6737dcada1845c074cb80addc2286743b1cab3f5d20fa38ee39c6930aa7d6  ltk/crates/ltk-manager-core/src/overlay/tests.rs
+7431f776b9db142507c6ee0bee0977b52c5f2c51a5dca42da3497f0906f9f7f8  ltk/crates/ltk-manager-core/src/patcher/dll_lines.rs
+6d0bbe47c6ff509b913eb69ca2a463b757e4005c9e726c8d9f19d1dc62892117  ltk/crates/ltk-manager-core/src/patcher/elevation.rs
+58fbdc077e26cef16315220b164179710c731cc0abf9cff1b91ca1ede2dd03cc  ltk/crates/ltk-manager-core/src/patcher/error.rs
+ae402d425422b262bf33acac5fa6a5eb98cf481fd32970bff0f780b796cb850f  ltk/crates/ltk-manager-core/src/patcher/events.rs
+7d0c5758fef87f5bc9b58347ae3f9fe6466082acdb8cc4bafdde8bf951757191  ltk/crates/ltk-manager-core/src/patcher/host/mod.rs
+6fc281a167a921a5e3dbf1f6ba13de4254f321088aa493f61e7381cdd212e3ab  ltk/crates/ltk-manager-core/src/patcher/host/persistent.rs
+166ea79106d8facfb9fca93bb9207f22ef82697188c1982131ada84d09413497  ltk/crates/ltk-manager-core/src/patcher/host/process.rs
+e1264184c56bb487ab1c8c67ccfd30a56bd9ac74c5a49e0c7b4f729b31078052  ltk/crates/ltk-manager-core/src/patcher/host/protocol.rs
+e40467cc28099da0511649ba582da425466de6630c9df24a7628f801664b6676  ltk/crates/ltk-manager-core/src/patcher/injector.rs
+dd58af5d9e2f04837f7ea82106ef63ca8ad91dadf2d86eff0149b9afd3956e6b  ltk/crates/ltk-manager-core/src/patcher/mod.rs
+c944fda890196325dc46d3b3c55d8fff9272a9a42bc84fe931977c6548523239  ltk/crates/ltk-manager-core/src/patcher/pipeline.rs
+499858dda6dd859c7ffc3ef50875301d04675f30ef3b4d95fe988c60783123bb  ltk/crates/ltk-manager-core/src/patcher/pipeline/tests.rs
+a43707e5149b621650c14f8f2c1e7a3c81124a1de65d55a856f59abae7042663  ltk/crates/ltk-manager-core/src/patcher/recorder.rs
+ae2a592fb55d7efcf509becbeb3cc2285ef1bfd8145fda9d9f50225bd0ddef8f  ltk/crates/ltk-manager-core/src/patcher/refresh.rs
+39026bd93a2b67f0c7747b127e7d8db59c5747e225aaa38badef56886f703add  ltk/crates/ltk-manager-core/src/patcher/refresh/tests.rs
+5ccffad27b1bc0a6946ade774caf5197eecceed5fbe97f4af66a7ebba0177536  ltk/crates/ltk-manager-core/src/patcher/session.rs
+3fa354c4ce34defb01d8a842352d9f787c88d57db4be20dd6396666464aace30  ltk/crates/ltk-manager-core/src/patcher/state.rs
+7d12d3bfda8d84efbb6a5ed980b3651faeca94e8a82282d78288bc5b6f272c83  ltk/crates/ltk-manager-core/src/patcher/thread.rs
+dad34e674e4316b50ca293b316dbf7b704a1e959fe2ee56c839d7d68b8708369  ltk/crates/ltk-manager-core/src/platform.rs
+f114575320b6bd8c405ae445d5bb0e28b9ef15a79d20ab03705f0a4c42a4630e  ltk/crates/ltk-manager-core/src/platform/windows.rs
+07c3babf1a9e1489de7a956074391bd066a9cae3db295b9dada6e2ec136bf1a1  ltk/crates/ltk-manager-core/src/preview/animation.rs
+324f9789d80fc532e2a039edb41a4cdbf5552c27c3281acfa1322ca91b1939a7  ltk/crates/ltk-manager-core/src/preview/animation/tests.rs
+29bf7059f591937b59bab7de42a72ed11e2545f24889019d72cb9315cac6ecce  ltk/crates/ltk-manager-core/src/preview/font.rs
+02de0b91b4b6aa9ec77e47d4c5d2938699b5f473e695f86c8713408869b276f7  ltk/crates/ltk-manager-core/src/preview/light_grid.rs
+cf87a980ebc5b1aa4fef2d1ad7321e7591a6bbea5b662cdc865af030fe1a787c  ltk/crates/ltk-manager-core/src/preview/light_grid/tests.rs
+01ccdc5fddf1023e2a3167bdd85d573a2e7827ba272e0072b5fbe2b1e9c0590b  ltk/crates/ltk-manager-core/src/preview/map.rs
+24bd082a1cb27dcae77bf462e5c5c738370f29d09585fae48912f86799d12f56  ltk/crates/ltk-manager-core/src/preview/map/tests.rs
+62f8a5bba05923ab20f15178cc8d00c6aa6f2bd45d565fbbd890736184c5832b  ltk/crates/ltk-manager-core/src/preview/mesh.rs
+4ecfe03eafc13ac1d4e84de0bce992c2f40a5d1cbb861278729b10e266f19e04  ltk/crates/ltk-manager-core/src/preview/mesh/tests.rs
+87e64c3c41859916e88cddd815ded287ab8a65ccf56f7648c9ccce34b2530356  ltk/crates/ltk-manager-core/src/preview/mips.rs
+c670ff1ac03e4b481fd023759ce259f1df782281a6c9348e2a6c64b909c2092c  ltk/crates/ltk-manager-core/src/preview/mips/tests.rs
+88b488d60f3c08f1ea06fddef5d457e0ecb8c7a9b7a0cac4170ee8beb7f62f2b  ltk/crates/ltk-manager-core/src/preview/mod.rs
+70a0f87cf1170a71909987ed85876edc921ad1352ed7dbc0988e9bb0fb2accd9  ltk/crates/ltk-manager-core/src/preview/skeleton.rs
+394f3113f0cfca58ff499869836ca85c775a6955f88339e1bcfe514b9f6a1918  ltk/crates/ltk-manager-core/src/preview/skeleton/tests.rs
+6f1740b86a7014bc2ff4c96555ddaca6b9e1363404c839db028b3f20346803ad  ltk/crates/ltk-manager-core/src/preview/source.rs
+1f233f1d0da57d4da0a5efe2807058148819c1c78f9e22c125a435287b08f802  ltk/crates/ltk-manager-core/src/preview/texture.rs
+66896916dca9675a248c3d912691395d41d87666f75e665fc9e163fae64c8577  ltk/crates/ltk-manager-core/src/preview/texture/tests.rs
+1f848b967ada70461fe98c5757ec6b7302629a1e715811626c278c744a77bb32  ltk/crates/ltk-manager-core/src/preview/tga.rs
+6c48f241c5e7ac02d1382f05b6640e84a2a1861c35620c762ec96eddc7e2048a  ltk/crates/ltk-manager-core/src/preview/tga/tests.rs
+eeb2bcec90147eb24304c245aa373d9d6847dcf93eec42fd4293caea1cb712b5  ltk/crates/ltk-manager-core/src/preview/web.rs
+4a90ced7a12a7cdd9d915ba38a333ab754a67a29a149d975a4e2a58601973d6f  ltk/crates/ltk-manager-core/src/preview/web/tests.rs
+a0718a8f687d767b390a6965cd0a44f916ede0330efab4c3e1868875381b449c  ltk/crates/ltk-manager-core/src/problems/bank_units.rs
+685084e411f07d42a0afa1cc4be04a6df92e5fe37834037321ce9690e66f22c8  ltk/crates/ltk-manager-core/src/problems/budget.rs
+04773ec0de4de3d018bd62f478b8793d94d84434471c5c0cba1a7f5a03c90e21  ltk/crates/ltk-manager-core/src/problems/budget/tests.rs
+55ff03bd8baa77732817d407e81f9598717ea49900828b15045c1c0194ad49b0  ltk/crates/ltk-manager-core/src/problems/build.rs
+f35ee1daae3152607630aaf10f187835d079a396d5b83f44854a0a25f20ae6aa  ltk/crates/ltk-manager-core/src/problems/engine.rs
+45c9fab4f7688f2134a7f9a3eee42fc3cd5e0e28d1e3628ce629a745c709abeb  ltk/crates/ltk-manager-core/src/problems/engine/archive.rs
+c3260744a6e01420d6c6af4cc2ad8899bbb3fbbc2cf4d40e9ec4e56c4faf0d53  ltk/crates/ltk-manager-core/src/problems/engine/tests.rs
+6db7e799fab2b122018668a916f7c2e96fbac651d9ea89855e6e44a278b41d78  ltk/crates/ltk-manager-core/src/problems/fix.rs
+d46c511002c327671694c1270e6a7943d080b6ec0076522edfb2d7209df3f164  ltk/crates/ltk-manager-core/src/problems/fix/tests.rs
+23a0d1907154b213859bded7400b202d76667b6a0852fc3c5776a50a817f9696  ltk/crates/ltk-manager-core/src/problems/game.rs
+864b9055e4f922e6987178168bd23fdc8c005347441fcb6513e32fd02b19648e  ltk/crates/ltk-manager-core/src/problems/game/tests.rs
+46b1cf809ba13880b435578fb1a9508f64629ceb723416e88117101a18604b73  ltk/crates/ltk-manager-core/src/problems/mod.rs
+5cc98d7c9143360fa34d19ca506779627971af5c4de408746c232e9134467da9  ltk/crates/ltk-manager-core/src/problems/names.rs
+f2f58591cb765347cbe8c2bde05f38a43ef07f7caf2b15f4b105195ef627f1ae  ltk/crates/ltk-manager-core/src/problems/names/tests.rs
+d139aa624f6b0b87da4634e6fb1a824db1f1581de8374905079c0221f1630ef1  ltk/crates/ltk-manager-core/src/problems/pass.rs
+76780dec4f06bc11d55691297a77b92b09e31767c3537a84b08d84ff72f06783  ltk/crates/ltk-manager-core/src/problems/pass/fan.rs
+d06f18c322f28b98d754382a0dce2982f71cefcd4120c7923999ac6d77d42eac  ltk/crates/ltk-manager-core/src/problems/pass/plan.rs
+cf808790654c9f744ecbbad68371b709d6ac616cac48d4c6815e4f7788616e79  ltk/crates/ltk-manager-core/src/problems/pass/source.rs
+84a8399d591e6f59cd8a9ea1da73887c52af749f116762aec8e39318b66fe8ed  ltk/crates/ltk-manager-core/src/problems/pass/tests.rs
+6ac76cfe5f7175d67edf5f6d6df783c364d5ac121bc33e5a3e40642f57a78b5f  ltk/crates/ltk-manager-core/src/problems/preserve.rs
+c109b6e92b2a72422705e32ec85acce0eca37303757762416444e3b8072caa1f  ltk/crates/ltk-manager-core/src/problems/preserve/tests.rs
+fccd4b261c47add3bd319ffb1f6b0558952f7b757d1d1db5635c85e40a3a03dc  ltk/crates/ltk-manager-core/src/problems/rules/audio_bank_id/mod.rs
+c7eb8adbc9329f7c53f50825e7205e0b212f5100b7e1e1530cad7b7bae1bf687  ltk/crates/ltk-manager-core/src/problems/rules/audio_bank_id/tests.rs
+bc3efa11f1d44ea1523594500f1a953194a51f6d88469cf58c47d00046701202  ltk/crates/ltk-manager-core/src/problems/rules/audio_bank_version/mod.rs
+2ae6a6194a3d61b8f23421a5bf4dd165e31a72695e183a11d158cc1561189ee3  ltk/crates/ltk-manager-core/src/problems/rules/audio_bank_version/tests.rs
+1d8e6753237c27b4addcb094d83292b44a5867e127151e68a23c33aeb49c029c  ltk/crates/ltk-manager-core/src/problems/rules/bin_property_type/kinds.rs
+a3bfc9f72fe37e3463b1945ebcfdbd2f3063b54680e54ad73e997401cf88c5dc  ltk/crates/ltk-manager-core/src/problems/rules/bin_property_type/mod.rs
+ada0accd3a5499d2b372d4ab08cecbf4aa9221c1fd90a8e6ff2af1521e5c7640  ltk/crates/ltk-manager-core/src/problems/rules/bin_property_type/table.rs
+8ae90b89ac0c2f96552ab1b6e3617ef50c7be1589e7694309e195d5b42b342cb  ltk/crates/ltk-manager-core/src/problems/rules/bin_property_type/tests.rs
+ae049866d29c8677b948937c7303c1d2f8174d195e7bfde23ce7bc3350579657  ltk/crates/ltk-manager-core/src/problems/rules/bin_resolver_key_loss/mod.rs
+a1f033d86bb960c00f7c1d8d9ad34ebaad7d08805b28168bed3be106e8ee29de  ltk/crates/ltk-manager-core/src/problems/rules/bin_resolver_key_loss/tests.rs
+5a2b8c9a60a86673415a54bfe5ebae8bed23103b29817b83400d6a4ba9e6b300  ltk/crates/ltk-manager-core/src/problems/rules/mod.rs
+cebd00f6955c5d07f4992a31b1a1434aa089b6894aa673753acd8633868a800e  ltk/crates/ltk-manager-core/src/problems/rules/tests.rs
+57a920f3554ce2d84c0cdce0859b49a20219871b6ad4f3f90a716a632f4e886f  ltk/crates/ltk-manager-core/src/problems/rules/tex_block_alignment/mod.rs
+e49d7c164f8be0f9b26168c5535d8bb530253dbb064fdb2003aef439f6ff7214  ltk/crates/ltk-manager-core/src/problems/rules/tex_block_alignment/tests.rs
+8533106033940f2c1f902845ed419dca912440e80a7271c0843e9fbab203c56f  ltk/crates/ltk-manager-core/src/problems/rules/vfx_random/mod.rs
+b22774293b91777ebefc94c445528dfa106c4f3f1533776a35782abddeda0bfc  ltk/crates/ltk-manager-core/src/problems/rules/vfx_random/tests.rs
+bc40e5a4317fcdd0880a0de7bb4057dc7c9fb27cc48d91db8c45b9422d084065  ltk/crates/ltk-manager-core/src/problems/rules/working_file/mod.rs
+84d56af454ad566c4158964480f101af9cec4076808d253c67e6c5a53073facf  ltk/crates/ltk-manager-core/src/problems/rules/working_file/tests.rs
+bafac4bb94ea9fe961e11742e5b7a67922f571e8b2f04f673bb2230221a8cbca  ltk/crates/ltk-manager-core/src/problems/tables/binfile_migration_16.17.8087655.jsonl
+1def8fbf03e76655837a1229884bfb633a76200109807d856773e3129d920096  ltk/crates/ltk-manager-core/src/problems/tests.rs
+575fef4348160407a8be793d3479a7372b4592cb969bb8350da399ee9f4af6f7  ltk/crates/ltk-manager-core/src/problems/walk.rs
+7d0e36a5b392dd460ea1c01dabaf93095c351cc72961c95444287a520dc70546  ltk/crates/ltk-manager-core/src/problems/walk/tests.rs
+71275a08329176c19ee4cf32538f7dbacb976dc3c4d5c2f3a146e0cea49c1b4c  ltk/crates/ltk-manager-core/src/releases/mod.rs
+d7b4b8a2d5d9fe03d5d63e4da6be92a52348f9062fba53338c3d4c63e3309c36  ltk/crates/ltk-manager-core/src/releases/tests.rs
+6eda6c17deb3022f5c2de2b08141d82c8f61720d653781e7241bbc93f67d567a  ltk/crates/ltk-manager-core/src/ritobin.rs
+07c75728243c955bbf6ba9e3ddcb83f66c36bdd9e2ca241cd57b53fbe7ca0a1b  ltk/crates/ltk-manager-core/src/sandbox.rs
+139b60c43cd68b952dadaa89f351639f233c6bc58b66a0562ab7e36ed6666dab  ltk/crates/ltk-manager-core/src/sandbox/tests.rs
+767822df51e064461467b7b1e6f4d04a8fffb8312e2ecf9ac428156bdc4068a2  ltk/crates/ltk-manager-core/src/storage.rs
+2223a5ddb1d23f8993f0019c1bcba6177c8bb228890e159e51601a901b7b5767  ltk/crates/ltk-manager-core/src/strings.rs
+d4edabb683efeba2c4add9524ddbe4b9384683aa22a092d0b5fc49c3f5d5098b  ltk/crates/ltk-manager-core/src/strings/tests.rs
+9fafe36b66cfb3dc7ba8efba7e0888438563f334f663828800a40d9cacbe0d45  ltk/crates/ltk-manager-core/src/utils/client_settings.rs
+85467d45b57dc7d493e460907a2f0593b1c173eea084b348a75ddbfd077c2013  ltk/crates/ltk-manager-core/src/utils/fs.rs
+5106d51c795ab2a39219421ebde20b00aecd29fc8259f5ac32d1976a58cb0efd  ltk/crates/ltk-manager-core/src/utils/game.rs
+c678ebbac98658f09b7144d3f4621aa5f3c53a069f62651e8698b494c9b58acf  ltk/crates/ltk-manager-core/src/utils/lazy_slot.rs
+d09383d1a36d7dffc008207b1815986e13cda83e0c488c0d6b856df9aecfad0d  ltk/crates/ltk-manager-core/src/utils/locale.rs
+c743530a110ea670326f6aeb840dcd8636bb70d201ee7ce726ea59d8269eddf7  ltk/crates/ltk-manager-core/src/utils/mod.rs
+698f011b1374bd9815b1b67c8237b0bb0bfb90490b2d2c52086415074ed709d0  ltk/crates/ltk-manager-core/src/utils/natural_order.rs
+acc1db3ad91d59725594038e1fc6550d179525ede89461d0fdb73fdbbb5c6d5e  ltk/crates/ltk-manager-core/src/utils/path.rs
+1cdc7b943aac034dc57df3a4162957c312a862d486a502dc9ed75d8affe2d829  ltk/crates/ltk-manager-core/src/utils/thumbnail.rs
+a1c67ab9ee33654acaf4e940e06be352ad5e59dea0f237a952db329fc99be640  ltk/crates/ltk-manager-core/src/vfx/mod.rs
+53a340f6282e1291fda85cd3a6b2df926ca8fdf0fddc1e53dc091779efbb52eb  ltk/crates/ltk-manager-core/src/vfx/templates.rs
+500942b1841b55fb87696b7876a842989858b878df4ece85ecd6d353420fcdd7  ltk/crates/ltk-manager-core/src/vfx/templates/emitters/distortion.json
+c0b3fa76b8a1bbb2616d63244e7367b1ea60b5857e838e46fcd25c6bec859df0  ltk/crates/ltk-manager-core/src/vfx/templates/emitters/glow.json
+e5f6506b77f148ac738a3d441cb525be308309696fff7d413e5d4531cb326564  ltk/crates/ltk-manager-core/src/vfx/templates/emitters/shockwave_ring.json
+943425af1cc49c9e06c9c75e394c7eba518acdabc6e224f1f015636b9cc5eed1  ltk/crates/ltk-manager-core/src/vfx/templates/emitters/smoke_puff.json
+f8ef333a72d03ad2cbe8e987c9fb1e5acf0ae08d8e46658477e7bf6e931f4afa  ltk/crates/ltk-manager-core/src/vfx/templates/emitters/sparks.json
+5c272da986acec583061a5fa27a39aab7f6d2e06160fb7167004381a366f2bd3  ltk/crates/ltk-manager-core/src/vfx/templates/emitters/trail.json
+e43c215da7d2a897c2bb631aa5522b440ba152ad3760a4b230734caac4473612  ltk/crates/ltk-manager-core/src/vfx/templates/systems/aura.json
+e5017dd3ead8a0c775eacfbcf46873987c8d27d20c039d0c79b284fa1ce4bbf3  ltk/crates/ltk-manager-core/src/vfx/templates/systems/explosion.json
+0d635c2eb1af4d03066b4d330d7e6666170e400ced1dec6276f689d7dc6737f8  ltk/crates/ltk-manager-core/src/vfx/templates/systems/missile.json
+b9eee983e2757019953dd2552c77384fd0d734c72dbe40d49c7657992c678ee5  ltk/crates/ltk-manager-core/src/vfx/templates/tests.rs
+0bca6f7efdc969372a3621a7f3d6a08efd688c848043d119d492343442daf8c7  ltk/crates/ltk-manager-core/src/workshop/chunk_names.rs
+fc99bbf21a2bdd162804f773c164b0a502aff4fc37751a3ef03029668e089d97  ltk/crates/ltk-manager-core/src/workshop/chunk_names/tests.rs
+1293c788c620b518bd6edfa6df901cea9c07ca50487e1542cb0d054a4c221a0c  ltk/crates/ltk-manager-core/src/workshop/content.rs
+0b73ae9a9123b3dff7209305afedaf1035252bca4ab4e0526568919385cf4a75  ltk/crates/ltk-manager-core/src/workshop/content/tests.rs
+e770d1f86bd0e1a6c3387de66b326f4965181da95ab712a4066098632f619b62  ltk/crates/ltk-manager-core/src/workshop/declarations.rs
+5f9911d47bb283763bd1c2a698d03766503b0222f4935c2c9169862bd71b5cba  ltk/crates/ltk-manager-core/src/workshop/declarations/outline.rs
+41fd906e3153de6150ef69f702ccd0057619d3258666932623fe68a1b285bed1  ltk/crates/ltk-manager-core/src/workshop/declarations/outline/tests.rs
+1c7ca3c7d0008c67139f0a33022c5d5c53c1e1a8a1fd00bd63569fab534e1026  ltk/crates/ltk-manager-core/src/workshop/declarations/tests.rs
+b0d2eda14fdd47843a2eb10ee457bd0445e01f62a8c1a76b7cb3b033841adfe1  ltk/crates/ltk-manager-core/src/workshop/default.modignore
+d291fc68411f95f4369aac9913bad8435be9663e083b33823117480628777353  ltk/crates/ltk-manager-core/src/workshop/folders.rs
+17f3f9ff62969fc5d6d7eb9b564725213a630d52c6a0a044f6bc8646dee1f82a  ltk/crates/ltk-manager-core/src/workshop/folders/tests.rs
+62288596bd4bfa7b836ae56ad9fd92f8fdf4320bb2efe03367c96f20f3f8f17a  ltk/crates/ltk-managrates/ltk-telemetry/src/spool/tests.rs
+c9e89ecf1fb50f65bb2465f0125750399ffc900c816d1a4ba4208ea09fa62eab  ltk/crates/ltk-telemetry/src/tests.rs
+60329d905894efa4508caae32205221497b1c23505c8e2e5080f4a4383cf2b34  ltk/crates/skinfusion-customs/Cargo.toml
+a191df912053280ca219387992256fb60cf304787b47151379fa7e9eff5e5644  ltk/crates/skinfusion-customs/src/checks.rs
+29e1749f095f2bd8dd597815b1ddb68b1a16bc902a1d3c9cce311a7f3fafee5a  ltk/crates/skinfusion-customs/src/main.rs
+0ec2382fe7323a6c21abeacec5873bf6989b2ad3cc581d1ee0c4c502106a673e  ltk/docs/DEVELOPMENT.md
+1c487990d6c7249c271e1fb5c87ab32000c639850a17eb4dc6bb91d02389f74b  ltk/docs/ERROR_HANDLING.md
+8c5703ced386b98d45759efe6959c480be8d1e19a478d69cf802af11af1f53e5  ltk/docs/PRIVACY_PAGE.md
+0e2d8b5c88521dce18dfc0d3e40df72e80e0a134b696316e01aada4645b11e79  ltk/docs/adr/0001-fantome-unpacks-modpkg-stays-packed.md
+7785634cf3b5a9f2a0f98e466564224146f8ec43e5c160dde931aec3c045360d  ltk/docs/adr/0002-library-json-is-the-only-record.md
+21bc5bee7221482752c97d520a6116ca93dfd66a83a4e14efaadba9e71ca7a99  ltk/docs/adr/0003-the-layout-migration-moves-files-it-does-not-convert-them.md
+2109ef971141ccadce415204e7ccf895783d7305b155b2d2d0fae369f485f12d  ltk/docs/adr/0004-the-storage-mode-is-a-per-mod-choice.md
+0ee7a7b5beb0dd59eb86f84051490fdada8c1137b08213567218ce7ad6592151  ltk/docs/adr/0005-a-repair-rewrites-the-archive-in-place.md
+8f502aedcbbf2e4ee99dfbeb152826a2c57464dc2b328d1c47532da20f9b25c7  ltk/docs/adr/0006-a-repair-preserves-names-instead-of-keeping-a-restore-point.md
+a5ae8ed781949f37281c359c8e7fac875af0171677a5be876b86a534ceb73388  ltk/docs/adr/0007-an-install-keeps-the-mod-in-its-archive.md
+961ea638617152df3b103f1e39284bf4409540a725644178daa263111e368749  ltk/docs/adr/0008-a-failed-conversion-stays-in-the-legacy-layout.md
+b13c9e43015bcda7d7e9f2a32a93abb892a97b80305ef57d65c33b3539c52c5d  ltk/docs/adr/0009-a-health-check-requires-the-hashtables.md
+0bc30b006b217679ff6f4ba2d19286ff2f2b9965ea0909b06041d7e012b86cc7  ltk/docs/adr/0010-a-rule-takes-the-games-name-for-a-failure.md
+ffb13200cf46ccd72e9da6105b5940b32edf458139fe11311c9407fb1020d2c3  ltk/docs/adr/0011-a-repair-may-lose-fidelity-where-no-in-place-edit-exists.md
+d5d4b5fee56c3246a2f2c7c39e608e963e94fe23a3360f96fe7ef0cef43226b0  ltk/docs/adr/0012-the-overlay-merges-a-mod-over-the-games-copy.md
+e079b976125d1251160dcb940e1471f16142d90c108ba6c1bbb300ed6e808668  ltk/docs/adr/0013-a-rule-subscribes-to-the-pass-instead-of-reading-its-files.md
+89fc1b5d1482eb67ab5314bd4f10201360c41d8e1618a2addcc07a4fea95406c  ltk/docs/adr/0014-the-pass-hands-a-visitor-one-object-at-a-time.md
+af2dd49dbbdb2960a3822a3aa89602ce72dcee37ecd332a1c87bc65eac9b8056  ltk/docs/adr/0015-the-pass-reads-bins-before-files.md
+dfd069c040b91c62426b3c2699f91f3201982dc59aab559f88c7949e1cb72266  ltk/docs/adr/0016-a-rule-declares-its-audience-and-whether-it-can-be-turned-off.md
+c70bd24bfa39a711d962f8fcb5394b234f869c5df3b00acf7c98424ee0c4caa1  ltk/docs/adr/0017-the-frontend-owns-every-user-facing-string.md
+50db64a3fd844e1c53d78991f4063af40b565b10026b57424c2ffb38d0a87543  ltk/docs/adr/0018-generated-message-modules-are-not-committed.md
+16a8ee96d945819ff5550fe744a2afb918feb0645d2bd2578836112c16f177c9  ltk/docs/adr/0019-a-domain-id-is-its-own-message-key.md
+5f31f7006323632f5e118ef55bc98191cbc8549828de46985ffc7cc4d7245b6c  ltk/docs/adr/0020-a-visitor-is-generic-over-the-tree-it-walks.md
+7639ab5ab4c30c6eb9a16f93aea5426d39a11ea3894b00c4dfedbf852320a1c1  ltk/docs/adr/0021-a-visitor-instance-is-made-per-bin-and-folded-in-file-order.md
+0686934fabe91d65a37bbd27b9c26b0a362b11579a9749e84f947e399da7e397  ltk/docs/adr/0022-one-self-raising-dialog-holds-the-screen-at-a-time.md
+178df688ceb8638c3616d6c86ce42d4af6e1d3f78fdd684c6aaf56d511290ef1  ltk/docs/adr/0023-a-setting-id-and-a-ui-path-are-two-id-spaces.md
+cf043ce55d94ee5c0b30788e027f88c0d0e66bf2deac8c34481ec86470bcfe9f  ltk/docs/adr/0024-a-setting-id-is-its-key-in-settings-json.md
+95dd856d4f6a525bfdc7faf97bf6a7a176dd67590d98e06fdbd62b54eefb84ee  ltk/docs/adr/0025-a-repair-reads-the-archive-where-it-lies.md
+cfd349f1000be42e4b3ce69c1eac17e33f656cb661b21e5aa38031db7084b4e7  ltk/docs/adr/0026-a-saved-bin-is-written-from-the-tree-the-backend-holds.md
+6678716908a8af07dedd596223c7ca3972cd3426ae31b0351939068f10959c10  ltk/docs/adr/0027-a-node-is-addressed-by-the-games-property-path.md
+277bdb6412032c80444821a6017c6fc424ba9bd5444d39c41c92f17b419e3939  ltk/docs/adr/0028-an-object-is-a-document-of-its-own.md
+988d194d007fffdb0b808708fb273d1bf1309ffe2e04d295a64842dd32205251  ltk/docs/adr/0029-the-generated-bindings-describe-the-wire-format-they-do-not-change-it.md
+036ce33afc4583c9f93766576d8d0b1cc4bfbb546e7d3ba556e2dc3f0f98e80c  ltk/docs/adr/0030-a-class-view-is-a-layout-over-the-rows.md
+09c088df3d8c281470f03868cd97644d77bac070ed9d8ac7c523050199922d2d  ltk/docs/adr/0031-a-layout-declares-the-frame-it-draws-in.md
+b94c558650733a79b21eeba3d774c39bf4e4ac7b5edb5d5cf3f65593e89b61c2  ltk/docs/adr/0032-a-curve-draws-in-a-dock-under-the-object-tab.md
+37b5d76af8c64f397a6c77e274941a083946a1a5119de7117e42937af9bb0f12  ltk/docs/adr/0033-a-dialog-shares-a-frame-not-a-manager.md
+385383dd3e91a3a02ea40930aa8fa4a2eac38d23a40d2489218f7f7ad5dd7bfb  ltk/docs/adr/0034-anonymous-diagnostics-leave-the-machine.md
+28cfe0e9c04fe7c6fbab10ec6b621bb275754a3b1e3a4cb8300df76d993ec6b0  ltk/docs/adr/0034-the-shells-panes-are-the-editors-split-tree.md
+904aaa86e5bc8ff4e6c1a8ba32e4c114d5de6d09ddd01d3062fd27787e12c1f1  ltk/docs/adr/0035-a-skinned-preview-is-a-skinned-mesh-posed-by-a-baked-clip.md
+ea7abe7017c105940dc7233909bb9162aeb7f7ca0d38101b1b38f69a89f025a9  ltk/docs/adr/0036-a-shells-panes-are-its-layouts-own.md
+0272c04a9180e9b3865c2e142dcb3e1f36f4e05df01acb04ba31244f011d60a9  ltk/docs/adr/0037-the-run-is-the-shells-and-the-timeline-is-a-pane-of-it.md
+8fdb4d6c97f5629f0c6a37379532848e5ca5cdaf5bf37f224121158d049a2fab  ltk/docs/adr/0038-the-rail-fills-the-primary-side-panel.md
+32ac1c9f61b0e33d81d0ee3f1f20d820c6ecfd2cf3e0ad8044fb06063f451f0f  ltk/docs/adr/0039-windows-ships-the-nsis-installer-alone.md
+7e9a522b33d65a76e9589b92b9ef5df705f2179a23a526c683e24d0d7065dab2  ltk/docs/adr/0040-a-bin-save-writes-the-edited-objects-over-the-bytes-it-opened.md
+accde40db0c8f63899e65d7a230f965c6204d6a0871ba2fae68b139486e55964  ltk/docs/adr/0041-a-patch-records-rows-are-addressed-by-its-position.md
+cadf1d449b26b7f509cf1a880b9125f3a9d6e31cd0f8769a94dc3a9f9a46e938  ltk/docs/adr/0042-a-game-bin-edit-inside-a-project-declares-into-a-layer.md
+e33a07bf9afcd107cd7caa9d5f11a52344a871f20b929f9ec11277550a9e2ce4  ltk/docs/adr/0043-a-built-in-mod-is-a-generated-project-above-every-mod.md
+0816c92b5572c41b4555b4a43d18ed7cb1de8dc0b36d61f2d2a8fc9c258607dc  ltk/docs/adr/0044-a-map-backdrop-ships-in-one-buffer.md
+bcff247923a41a0fad62fb876c4775fb20186a0d65a755f91a49bcd8fc2259e3  ltk/docs/adr/0045-a-map-backdrop-draws-the-visibility-flags-the-reader-toggles.md
+a189528e478462d29a08215e0c4fa9ac4c94e7e34a3e1dd9cb794e33c338c2b5  ltk/docs/adr/0046-an-update-downloads-ahead-and-installs-at-quit.md
+58eb4c2695393cb73dc57d65f2ca4f7048a68a453963febc9e4514839ee1299f  ltk/docs/adr/0047-a-material-opens-into-a-shell-of-its-own.md
+bdefef4cc1c95ea8bee0fed6410fd5168f0a7ce2d9df5d56fde7f90eabc9bfdd  ltk/docs/adr/0048-a-declared-edit-joins-the-module-the-reader-chose.md
+4ab47549646a00970c95ea7d6b38c1f43206e1c984fe88bc94593ab37046a02d  ltk/docs/adr/0049-a-declared-document-creates-and-removes-objects-through-a-target-module.md
+6597ef23ee3d85da0360848c7f1ad87aaef04fe3a0780d4721b27ceb6c1ebc87  ltk/docs/adr/0050-a-declared-document-adds-and-removes-dependencies-through-link-lists.md
+4b3fcc9b06198afe8bc3747a750999752abb5429a57eba91df9c059fecc2371b  ltk/docs/adr/0051-a-bin-document-takes-every-edit-through-one-command.md
+bad4b39e276088890af0b88e2496a110debb976e0354a7a31c1500e4d17340cc  ltk/docs/adr/0052-a-map-skin-choice-copies-one-skins-environment-over-the-others.md
+5f076b7f1496ee14eafb7d783f069013db8e1447efc002be81fb1facb537b9b8  ltk/docs/adr/0053-a-map-decoration-is-forced-by-renaming-its-mutator-controllers-key.md
+f8b8f9e31c559a3ab2a85c75e003fa7bb770f355c84db70a2461c6b6e2bf3674  ltk/docs/adr/0054-a-module-is-made-empty-and-organized-in-the-outline.md
+29172593135bc8b861d83eecdbb6053fe8264300a9130a589dbd6ab0287682fc  ltk/docs/adr/0055-ltk-manager-installs-per-machine.md
+948ab30beda7bd58dc33ec9ecc8c826791e6119a8540bef56d252131eee40eac  ltk/docs/adr/0056-an-editor-reads-and-writes-through-a-sandbox.md
+962ae537d032cba5988e8a3fc8c87eedbdb5228f271a5221631c2d43cba1301c  ltk/docs/adr/0057-the-preview-rig-is-a-carrier-and-a-playback-chosen-from-context.md
+83ebbc6977c6829614dfb621f31ea8e117eae9be28a93bf6aba94946a07d10d2  ltk/docs/adr/0058-a-declared-document-creates-an-object-from-a-vfx-template.md
+7e673511b1d225107a214f5ca4fbeb17f44d5d5c2c5c265aa7d9b73891b294f9  ltk/docs/adr/0059-an-ipc-service-is-a-tauri-plugin.md
+2f9f8df275a5f3841de812c99f1aa0fb30dd389a4b9b78bb06d947fb46d0d650  ltk/docs/adr/0060-mod-file-types-are-registered-per-user-by-the-app.md
+0d2448cd5d93408d11bc171986dd9f48b1721fc3722957bf1b152fbb69875c92  ltk/docs/adr/0061-layout-is-a-primitives-props-not-a-class-string.md
+723d597dc1ba985d2c6d24be9a9c696696826db522c2b79632ef523fc95ee741  ltk/docs/agents/agent-evaluation.md
+b0c460c0b327ddb24931ac2b08a2d4811797bb086b27f3f509c9c607ed199e29  ltk/docs/agents/domain.md
+c2b4a22b5c31d8cd8cebd1fa6242141ddbcd4d700bf0b208038d3a60708f25ed  ltk/docs/agents/issue-tracker.md
+6eba90b46f8e9c1cdf2ded6620c3e87540fae2540bacbb121ae15d2a8e52ba3e  ltk/docs/agents/triage-labels.md
+bedc4171f9ae9a09ed933dfb93937cff1cdfac23f7eb64c757f8a70b1b66db65  ltk/docs/design/problems-pass.md
+38c1dff07ec4f3d297e6e5e8e425bf964141e6af7aba18e245427a8ae602b668  ltk/docs/plans/ability-preview.md
+7f9efb63acbf8cf860864f99e521f48d0e32cdfa2f5942c750475cf81b9c9d0e  ltk/docs/plans/animation-graph-table.md
+5044127cc45c8f91f87364fd415cd3ddeb394c7d3f17cf8471d1937dc06f562d  ltk/docs/plans/asset-preview.md
+614ba2b23a75a05ff656d087ed872783d4789dc289e25bf9c2632140acee043b  ltk/docs/plans/atlas-renderer.md
+473cd6ad1b30eebf403da339a1195143175b0e49d5381fcd9b4314417510028c  ltk/docs/plans/atlas-ui-editor.md
+f0d10613b9f6cd5f8ca97a3b34e06a7f669de6549f3fdbaa9bae5d76ce52d78d  ltk/docs/plans/dependency-drift-ci.md
+9ad0c24a9afa7beb48533768cc14966ea4e1c11cb05867d9ab7e4dd34ebaa823  ltk/docs/plans/editor-split-tree.md
+ee6c62d0441fe4999d80724f47650ffbbe226fe323d6077dcf5dd1fd0c0054b7  ltk/docs/plans/game-full-search.md
+748e910e120f745c9da013905927b000cf69d336ba6f19e0f45a293454133c1e  ltk/docs/plans/hexshade-vfx.md
+5988ab78ec1a777c5601d2455bf84b8140c862258672215a49ba93b9cfdd9757  ltk/docs/plans/inspector-bands.md
+16348782211e990db6ebe0ce2e50331851329634fc28beb5bc96fd89f86ed39e  ltk/docs/plans/library-details-tab.md
+639ddec75b6537ac7b150b465a7a7af00b54f077848896be91f4b6ca256cd70f  ltk/docs/plans/library-unpacked-storage.md
+af2b144743662bb63f19c19375237f587e8a3bdb3213f1cc9852b7bf228d19c1  ltk/docs/plans/material-editor.md
+c2d485cab443772123b9a06ff2558e213b0bb2de5b0f191e53db63a030b2cc3f  ltk/docs/plans/mod-autofixer-gaps.md
+3ed12fba74ee6fd474ee891c9e7a38ec8e45c9d42f527660d3ad315d65bf8571  ltk/docs/plans/problems-pass-proposal.md
+50de1c77da4a69c1425b2913710f7ba7c6ebb08c2f152dc97a79d4e19caa24b1  ltk/docs/plans/project-command-bar.md
+56a147c2570927a35d04182bfc002f71040545be5b46ab65cb23050a798e658f  ltk/docs/plans/ritoclient-launcher.md
+84d7b5efd86fccd089cf76546a42ed503747588ebe860b3467f601b7245733f3  ltk/docs/plans/sandbox.md
+bfcd3f07d0f2b49a504341938b58974f03ddaf0b7d36503b97cc4ee08e7eb189  ltk/docs/plans/settings-anchors.md
+e2ca9c1e7b10e27d47f0f62812383786856136e3cf2f4674a5812314ecf47340  ltk/docs/plans/settings-groups.md
+dba27f1d073d1c1cf4e130646be69f1d68d28624f3e45fc268861c4bf19c7c74  ltk/docs/plans/shader-pipeline.md
+a0a3887a12c299dac776a1947208b32411cb83567ab33088cac870131692bb7c  ltk/docs/plans/shimmer-driver-graph.md
+dd84117a0bb8c7349920080098ad89c0f691ac0115ec758aba498c2c4899ac32  ltk/docs/plans/string-overrides-implementation.md
+52fd80bc6c73d5c01b50cd4fe908184f6162fdeb19f2741b90fb643d65b73c9d  ltk/docs/plans/toolz-integrations.md
+12b40f78dced121abaee97ee412f070201816dee4451b1ca949ec92004cb9e09  ltk/docs/plans/vfx-particle-renderer.md
+12b2c8581ea6bac250a33205d588d446d785986cd1eda35775b0681c2c753e50  ltk/docs/plans/vfx-templates.md
+e98142503c73841ee6eba57a6f7230f089f27ffc1bd5fe6a2d858951a6a7e64b  ltk/docs/prd/001-problems-one-pass.md
+0dbd16f7b80be27f758cff17c05f02e2b193075f6945c39394c9dec49888ce4b  ltk/docs/releases/1.15.2.md
+928aaee76750cf7e4299b700e934fff1f6d565e55313d48430852c30788f1eae  ltk/docs/releases/1.15.3.md
+fee839aa409f64a5a8123ad7e3ac02d4688e5945a5bd8e2044394a644bd56d1f  ltk/docs/releases/1.15.4.md
+123e9b63e4fd5a7672022ad3ca01aa406943e896ec8d335374ed21237b7c7776  ltk/docs/releases/1.16.0.md
+d622a2a9a0b30cbec5e71af8eca9f2e7cc3bc5d11a34d18b68df4689d7334603  ltk/docs/releases/1.17.0.md
+9517a78f9a5b9f07d5fab019f5ed1b5613b3e629f60f7714827a86a4fd435533  ltk/docs/releases/1.18.0.md
+5ff4af586e117a743788e9a824ac07016e3b9c45551ad7d30a5bda9a6de3bbb6  ltk/docs/releases/1.18.1.md
+e07209292a9b6231fcbf5afd545fcc684bbe872b42fe49e26bfa59779a83df41  ltk/docs/releases/1.19.0.md
+0212cba1e8eb8604e9450238eb6c95af39b0c0c04d4540ca294b01e9d2f3f602  ltk/docs/releases/1.19.1.md
+2289ec47b9b54f2e8f0ca4910d47e12181f9b1ed187a7afe8dc33de81376a387  ltk/docs/releases/1.19.2.md
+91352437bb7a5ee3d82588d025ec6ade56f25a6200bd3490f957cc62c371e80d  ltk/docs/releases/1.19.3.md
+5f9aa39bc9c8480070aa579f4a39ad6677f28bb8230dad0b54a23d63c43cf392  ltk/docs/releases/1.19.4.md
+221d3f483804a27e0edc978417629f4f73ec676d5065b0ddbd106ff8ee7002bd  ltk/docs/releases/1.19.5.md
+e2af4d534d4f41bfa7d5cab58d89f0ee874db2ea21ee81f73224b65ace868851  ltk/docs/releases/1.19.6.md
+a87927352e398e10d567b7c014edce5920f88fee821a155123a587946a6bd788  ltk/docs/releases/1.19.7.md
+33486b36d13d65d6259822ef964956b60d41243df3b553a83ceab75482fea746  ltk/docs/releases/1.20.0.md
+8269a18e5e7910778b11ccb5014ca16c5cc05ceca2eb808f95f05c7d8c345ce0  ltk/docs/releases/1.21.0.md
+9c7f8838cf765981525df9b037783c6364f77d09fcaba502b2fc7210b032ea0f  ltk/docs/releases/1.22.0.md
+7003e44f3c1278def375ac2e1d77ec389db208b267db6c2326b221493d52c275  ltk/docs/releases/1.22.1.md
+e059cbe6e466777285fe11250388e0775e70cf0a3462f801443bfce5b13da919  ltk/docs/releases/1.23.0.md
+e417731ab15b9967aae21271e53aa1448669c689a3778e6165001ee47c793f41  ltk/docs/releases/1.24.0.md
+043ea7b2adc1b948943addd09f011a5b29e1e1e013741e7abe871dae639335b0  ltk/docs/releases/1.24.1.md
+9908095a79c07cd1120d78d1bef8b728fbc326adb0a105efe384020a4f172c2a  ltk/docs/releases/1.25.0.md
+72b6a0823bc0566e5f84829a65a5c4d5167ca2e0b34b0c365575eb5a572d0010  ltk/docs/releases/1.26.0.md
+ef162f97b3365727788d03398f921c7f0a8d9a34bab6d27588ae6cce198df6fd  ltk/docs/releases/1.26.1.md
+c9652463310f1e4add73c59b6dae278b079bae58d7cd803489b089535dbbc8b9  ltk/docs/releases/README.md
+fc6a630bf7d1efbf4b08c46e2327c753719bb5ceb6fab020e42f8395c23a0291  ltk/docs/research/audio-bank-id-repairability.md
+355791a60347af93bc6da6d3c448a6e3eac619fada4b63381d3436c8fefd0646  ltk/docs/research/bin-editor-curve-panel.md
+44b047b5e69aedd28dcd8f6d57549ceab98ce1874d74629e97f1d94a19c6678d  ltk/docs/research/bin-editor-higher-order-views.md
+4ab85047276520c3a7c06a7e472976680797150202696ec8812343ae7f1f2c4a  ltk/docs/research/bin-object-index.md
+4e34e9f5855c7e4e9db1ad2d86a0c371a380e094c52a6034712d82fde406e8c6  ltk/docs/research/dependency-candidates.md
+df35bcfc8f925a8258200a2a076f8d4f950284505f1efe3f1ef10d923d6c5b23  ltk/docs/research/frontend-architecture-audit.md
+e383c738c1f5ca2a48376be994ce8f2af2c141edf6d5901d85fa2833f56c85db  ltk/docs/research/game-db-as-precomputed-index.md
+89a32d8b5bd2f0d369b580348a5a70141beee334a9c18c8a10161329ed283ccc  ltk/docs/research/i18n-frontend-solution.md
+2529c342e36c5a0b4e55c7117ce6653871dbcb83595c768596b457d1cc70652a  ltk/docs/research/library-readme-sidebar.md
+fb090ae34e3bf1a9c232e8905a6465e8557b75d06e979580c3e2cda1cf8cb720  ltk/docs/research/ltk-mapgeo-surface.md
+6636c19331756fa97bfa2d4347eeb2bcbe14f89bbcbf8813cae9b68d0f12b57d  ltk/docs/research/map-data-layout.md
+c0ecc11ea45b7df380b5a0b17cb561f59d7d934205e3cbc1d4724b6719831f1f  ltk/docs/research/map-materials.md
+35a4af6c181caca094f27ca3694c44eb80816a944b19cb3e79fdd5fa6114f79b  ltk/docs/research/map-minimap-mapping.md
+5ae7ee043f5e68b69b418da20bbe1732f323560dfba3ebab6f1b2b5adffd6071  ltk/docs/research/meta-api-reachability-from-ci.md
+cf93ecc6cbf94e7fe0a44d68c0a9509683e958ac724f40d27874e7a843d943ff  ltk/docs/research/modignore-in-project-editor.md
+dada6ee5e51b00ec8b7d38b80c3d3ff548dc8e7d088d91e7eca6ba5976724594  ltk/docs/research/property-type-16-18-not-repairable.md
+c3556c690ba1c4eb3be223907b66b33e3a55646c79291196dd18225bf7bcf234  ltk/docs/research/readme-in-project-editor.md
+b009887bb20dd5f1cab24f27989916bb0e3699a244a613215f1fc8729311f5c3  ltk/docs/research/sejuani-spell-fixtures.md
+73b93d5c61652afbe3a010dce3c27890d331bb3d6f5acbef953ef12851a292bd  ltk/docs/research/toolz-installers.md
+d3fe89244dd268867796af1df7b03e7f99672ca86bae1d0ad717df12e255a85b  ltk/docs/research/ui-data-layout.md
+c2ebef8c14920bace4d15011375af143497cd0a80c9cedb0cea5c6f0d717cb7e  ltk/docs/research/vfx-engine-audit.md
+a2583c060eb9cbb4fabfb5709a555713aa5b3ba51e38d2130673430903d894f9  ltk/docs/screenshots/library-import.webp
+a174a5ad19ca4931865f11e0a9c06f681cbd041d0bf96b64aee1cbe4fc12ed12  ltk/docs/screenshots/trust-provider.webp
+33348681a3f0bd7769ebe8dd500b7ac6ea8a65b3b68fd1ce878ba0989714832e  ltk/docs/screenshots/workshop-game-search.webp
+c9a8b1fc7a3b832a412d4d09b313ed17f7a5c10772d7d7d23fb2a7c9d10bfdd2  ltk/docs/screenshots/workshop-wad-browser.webp
+c0697678d7af0978cc234f7262f9c86a5746d8c09a26778a0eb2ce89c9dc5f7f  ltk/docs/ux/BIN_EDITOR.md
+4321b364181351dcd3e50a3d42919812ef25a5c4b64515323629c10499aa55d7  ltk/docs/ux/HOME.md
+04b39c8a13a89d56b7211a7a29f46b35494d79066eb38ca00f24e18ca57b3104  ltk/docs/ux/LAUNCHER.md
+a4852c3e4fe7c40c3514fb75b1dc4780a80ddacc50434f592ab923848ed387ca  ltk/docs/ux/LEAGUE_DIAGNOSTICS.md
+aa9e8bbff09a0769b43497252d75240c90eb33a8ef80bba666ab6f7ebfee02b1  ltk/docs/ux/LIBRARY.md
+29e0d0807cba3a1a4bee037211edc354206525f40e7af20fe3fa2677b5b0141b  ltk/docs/ux/MOD_HEALTH.md
+dad7fc5c9e832e504142af8f07cc42053dd893134d92cf508a590768ba2f126a  ltk/docs/ux/PROJECT_EDITOR.md
+06ef3f45f43b890ddc0e008e9f41a387f79e18c46792389c5bd494ccadcc4ccb  ltk/docs/ux/PROJECT_PROBLEMS.md
+c85b4ea9705e724679aad72a24f273058f643f04a9dfb90fd0ce417986559f87  ltk/docs/ux/SETTINGS.md
+b2c23e2c0aa1fe71ef3a5d43f7ef4fb61783ab98c1d4c7ff097afae763aebd71  ltk/docs/ux/TELEMETRY.md
+e222833733ecdccc53b58b8158d8db74639bd4948f82f535eca34295d45cefd5  ltk/docs/ux/VFX_GRAPH.md
+a25a7153a38ede494d9259773f3ca3ece2bc12acb4891075d168df58089dbf5b  ltk/docs/ux/WORKSHOP.md
+27a084179f5fdca937b7e347a5274e3778fc1f3f36809de8e9713291fb681b96  ltk/eslint.config.js
+0f9986930a57926a5d9986ee0f3a20f20a1499e87e9785e3fc1a63c382ec4ae9  ltk/index.html
+1efff619ed09b9140dc90f0edd309718ac886c7b9d0b4f5f2f58540630e03ba4  ltk/messages/en/champions.json
+1241376ce35626bc859cc80026b6abb24662e78bc8c5bdeb21cbc66baf4005a1  ltk/messages/en/common.json
+d164d0f4d30a3a024d3352c276154cdf00e3855957807ea54137a9610a0259c8  ltk/messages/en/deep-link.json
+9aa4c41479bf7cfe4ede4b6e775588e9a82700e777a6262b50746743667ca88b  ltk/messages/en/diagnostics.json
+4e67a90bd5c79a2d858115a9d7e285583fdd06f1f6b70b5bf32dbd6786cb9b1b  ltk/messages/en/editor.json
+bee6af1ad50c6b0764d9e5e96ab25cc8b9769669cebc6b56cff303d32fbf9e46  ltk/messages/en/errors.json
+865c25f306869c932e5975021f3b84c170df39db80a8257dfece09799720b3d2  ltk/messages/en/home.json
+56581504be681c0522a15f41d6c9c2300e3bad75e8a4ab8500e3235204428008  ltk/messages/en/launcher.json
+14c7a8db6507b70e2f3c258d11c420be73c213134ccaf42771571318325472e1  ltk/messages/en/library.json
+6166e19e47680ddb7e46798e219302d9234a02dc83f8e19dec038d5101d23bff  ltk/messages/en/patcher.json
+056b70c6e6f5ce6c4c1cee5edd8dbbdedc7354599b546b12220ac5cfc4a6b15d  ltk/messages/en/settings.json
+afc7b39e36486414f874bb0e727dd4ad4e958519cf5500e2fec7f3b0ce911106  ltk/messages/en/shell.json
+57f7c1cf50be72dd28c006f4f8c32210c79b676cf0856cec6f6e423541562b79  ltk/messages/en/updater.json
+4c512a03b3e291015a0dce443d60366dd33dbb113c145ed2aed5479c4c6525a6  ltk/messages/en/workshop.json
+818ec9bcc95023242f39faeab9b28aba00c7acb419734030d0dacf24c0a4ddd5  ltk/news/README.md
+2bb4667c6453e1bdeec1e83ee861160d1b485dc37bb4ac7c485fbf801c8adb00  ltk/news/notices.json
+4f801c2534ba2fc62bab54c5943c78cc7e6a1b2fb1f05da814a7b3671f61f0e4  ltk/package.json
+ad169cea3bdcceb27ffad4f9435322a5e93fb04588b85b1e5fbe17d0b38b524f  ltk/patches/@react-three__drei@10.7.8.patch
+23e44892286b34635314bd513bfe19a3fef3d0e19818c40f0caed37a5d53bc71  ltk/pnpm-lock.yaml
+6a5f0e010f7803cd26454e2388b9a824abfcff6be16c6af67d2d68612a553b73  ltk/project.inlang/paraglide.config.ts
+778b0d2b167569dd1d59fb3554e017668ac250c8fda908c21615a41b38887139  ltk/project.inlang/settings.json
+06e0a5998d9bc375b4aa17c757731fd0914c4356f245ebe94269be4a6fbe1271  ltk/public/icon.svg
+9bd6a324292c9dc9888d75c7d7d8802132b707cccc8497fe52777e080b00d458  ltk/public/icon_load.svg
+b45b756458a6230800a83bbbf70e66f6f084f91b0f1205ce4cb6c78fc7fb2389  ltk/public/icon_on.svg
+29fc4e92aa4d3ac7b850e22de8e57953753b80569a639f72295fb94c573084a1  ltk/public/third-party-licenses.json
+6bf181d206035ece877a8ac7fe55965e39e4dc5ef024e03daa142d25a62eb002  ltk/scripts/dev-logged.mjs
+892c53d6158394e0c492e276eed15af8d10685081d050ad941b1aec211ac36fb  ltk/scripts/generate-licenses.mjs
+9fd391ce4167b62bb7f63580ecbd1d471956a9faac981ad9f1d81e4a7c5a769c  ltk/scripts/generate-meta-schema.mjs
+0e256d130d835fdedac07db49cff198b2df102d9196fa4263bdc3a73fcb771c4  ltk/scripts/upload-source-maps.mjs
+b0b0101790daf5d5821c9b86a5fad7dc90a6af5380dff5830100359feac698da  ltk/scripts/vite-release-notes.ts
+22db6ea642a622006eda2fa5c7f0433050de198362c496d5d000a73afb341bf6  ltk/scripts/vitest-phosphor-imports.ts
+414e45258ccd4452f5af3d0ca7b20aa11bb7fe1c6ca854837314fdd8dc370aa3  ltk/specs/007-library-index-versioning/checklists/requirements.md
+e4d9ea55773b0185ab614ca64340cb12473cf74672e1e06f7be6ca9029def9a7  ltk/specs/007-library-index-versioning/data-model.md
+48c33ed37f46f2189032f3d9046b976350a1fbedfbb729d61b3d7fa8ad7ffb04  ltk/specs/007-library-index-versioning/plan.md
+7703a65ddc461e58c0207197632129f66b8463268dd7992b225dd616beb011a5  ltk/specs/007-library-index-versioning/research.md
+bba03a9562ccd5567cae6ef04644fd5612ed8d81693899c61fef6f41e1cb1e78  ltk/specs/007-library-index-versioning/spec.md
+f45438640111102d34cc19206305558f768a35130b264f32fd81da1b6c3d2bfe  ltk/specs/007-library-index-versioning/tasks.md
+9ab5460184f9024a9695b741bea97fad1871914a2f69ea5a95ebc125f455c3c6  ltk/specs/008-we-recently-mod/checklists/requirements.md
+ec90d3b79aa1db053d0da1e1b49e7ebfd9f621001cbdc56bf46ac84246495da9  ltk/specs/008-we-recently-mod/data-model.md
+c08e3e2bc895593321b4b0b67cf180f9e9ca48411dbc5dd8346be314605d7d2e  ltk/specs/008-we-recently-mod/plan.md
+7469d265907073121f6558310f6061b0053db60a196b11c9887e9340399f64f4  ltk/specs/008-we-recently-mod/quickstart.md
+946119aa678520044c6b5833b75baf971facadfcb2cd717e7aebd5279ffc328d  ltk/specs/008-we-recently-mod/research.md
+7b98573ffe551a2c6b38fa24f39083e3751f8a16152a8aee4906306efb4ab3e1  ltk/specs/008-we-recently-mod/spec.md
+4a9545c65f740c7093444498adf29b706b8dc38a4dccc9ade499fc8dec2d54b5  ltk/specs/008-we-recently-mod/tasks.md
+0ee6a5aa5fab37481f694352f1c7d6d0d6da0a0b41b944e88fd0319c3a62565c  ltk/specs/009-zoom-level-slider/checklists/requirements.md
+1f53305d02d6a73245ab8d4a9e1e173152d3ce63cbcd592fc172c799b6012a18  ltk/specs/009-zoom-level-slider/data-model.md
+378dd35476bba6a53f55db2a2848b32eb51bcbb05f0de6f7a933d1647a1ebc50  ltk/specs/009-zoom-level-slider/plan.md
+52070b3227ed8afaad7850f535c604c84d660bcdae7e9ea8def7e6af2cda163a  ltk/specs/009-zoom-level-slider/quickstart.md
+4aeb06ce08cfa4561d4af28242c259c3f5193f3d76ba9d97c3b0032d530049df  ltk/specs/009-zoom-level-slider/research.md
+bbec5bda2a343a151a6119fe602e04ebaba460ca38a5f739bbe82256af36f340  ltk/specs/009-zoom-level-slider/spec.md
+142742efa379fc8c0ac9dc043918727d76cf3baff3b52020e3e1e4c3074c5207  ltk/specs/009-zoom-level-slider/tasks.md
+732360e1253227154fc094b3f672d27f96cb29c002246c39f170435b39c0eec8  ltk/specs/010-mod-wad-report/checklists/requirements.md
+606eb46de062a55187c75ad7f586f2705db4e53917e722173bc92877bd74ac42  ltk/specs/010-mod-wad-report/contracts/tauri-commands.md
+ef67399bff709448114c99c9f6093ae77ad64d14f191533afb3b1a1c00a2604f  ltk/specs/010-mod-wad-report/data-model.md
+5b728816cf4f1af36669a8f730c0a357c9f7d0e23ba703c1f5da7380719e735d  ltk/specs/010-mod-wad-report/plan.md
+c33fa39e155ce60bbc13c074d5085e6252fb90e9d007d224d01e797efa359633  ltk/specs/010-mod-wad-report/quickstart.md
+cbda35f38ce43e8a902b50d6cc48adeede92cae185e853e030818dbcbae5c045  ltk/specs/010-mod-wad-report/research.md
+975a27832c464d9e6383c3154b102ab04dad743dbe9610aae80c1a5890679e37  ltk/specs/010-mod-wad-report/spec.md
+727a1548e1c0cce2446cf74f2d399776932c53d322c79ebf3ad7eb085a50e7d9  ltk/specs/010-mod-wad-report/tasks.md
+99747865d9ee2272020c74dc24bd54639214bddf1c36338d6a72cc9043e906d8  ltk/specs/012-mod-content-browser/checklists/requirements.md
+71868296a3fb11d638249397ff8877e07c31714c67af99d897ea09e05a23dea3  ltk/specs/012-mod-content-browser/plan.md
+d373be3846c895c16feeeada5e5d724761db13415b8034ac6efcd083fd503dc6  ltk/specs/012-mod-content-browser/spec.md
+11171f750be2682abd80b7f32bbd5c9dead9f7699ba71ee5d9479396059e8bd4  ltk/specs/013-mod-defect-rules/issues/001-project-file-chunk-info.md
+22d7938883caa120b815fc82235da2ad0823fa7e5418355f0f6ff735b1cdad61  ltk/specs/013-mod-defect-rules/issues/002-file-handle-and-content-kind.md
+ece432533b6f4b0f2f8e310dddccce752b6dd3a4d97517a83fb6c01876b9fcd1  ltk/specs/013-mod-defect-rules/issues/004-audio-bank-version.md
+76b9d16e5c2ce2d59fe858983dc3d75b8cad36b76946b67c220403751ee0a2f6  ltk/specs/013-mod-defect-rules/issues/005-tex-block-alignment.md
+7e9d831b40fa5ddadd10ba3c9b91f53cbe5d233338d9096cf018af6ea52988ef  ltk/specs/013-mod-defect-rules/issues/006-bin-text-dump.md
+3104f6bfbfb9186c654f413f69265b649ac115be16ab781d3c8a7c3e2a525cff  ltk/specs/013-mod-defect-rules/issues/007-bin-resolver-key-loss.md
+bebec3a16171a0c880a16ee92d5f6597f12312e9bb080039e9919150e6d7781a  ltk/specs/013-mod-defect-rules/issues/008-wad-chunk-checksum.md
+f0b0d9f4ae8a506ef720a02f335802adc35840904af5d2a78c854ff770925dc2  ltk/specs/013-mod-defect-rules/issues/009-wad-raw-size.md
+bddca688583c05d4318f478c3778d45430f47d20cac2656a1302152768cc1433  ltk/specs/013-mod-defect-rules/issues/010-wad-inconsistent.md
+11db122a6aa9a5c7fe76c77647545bbb5f7ad80b31102c4af94f03908edf128a  ltk/specs/013-mod-defect-rules/issues/011-basis-bump-on-new-rules.md
+15f4fca71f3f464daa4cd04728d6e051eb0dea9aeadc14531e56e52f6dd81844  ltk/specs/013-mod-defect-rules/issues/012-audio-bank-removal.md
+9b8da344127043498a30d25b04c4e8694ab65aebb835f08469e3f893df260ba2  ltk/specs/013-mod-defect-rules/issues/013-audio-bank-id.md
+5f52465f04a08c5ffe1b24b22843cce4e0fe295c6110b3fb3a61309ee92e6a00  ltk/specs/013-mod-defect-rules/plan.md
+55effff106c00097179e3227c137c49bfc9047b585cee03a98206eab9451eaf1  ltk/specs/013-mod-defect-rules/spec.md
+eb17526ec1fc78f8f4174ab4bdf63b86fa2f827e65b59129b540242ea2b01f56  ltk/specs/014-linked-bin-cross-wad/issues/001-widen-dependency-lookup.md
+4ed295001ab2f6811b5fe8d1814afb7d7b03c46b59d3b56a451b8acb07d4c973  ltk/specs/014-linked-bin-cross-wad/issues/002-correct-the-stated-premise.md
+74186b321e52b48c8596ed472f55823f439b7ef5da6009490bf42c6a436ba679  ltk/specs/014-linked-bin-cross-wad/issues/003-regression-tests-for-the-premise.md
+0509c8218116acab88b80f56ab76bd6905918709740d8865adb7e2fbc25641ff  ltk/specs/014-linked-bin-cross-wad/spec.md
+d8431162a17eda1a846f84b7c7df861a9978d5a1433db04421b854664a655b73  ltk/specs/015-game-as-parts-source/issues/001-test-the-build-time-alternative.md
+560eddbc375d9f942ca1f79769c79d6f83686d2fcbf5cf9571a2b5d7416adf5f  ltk/specs/015-game-as-parts-source/issues/002-adr-for-machine-dependent-repair.md
+76c3f0a437cdd5992b87c85c48676bb894ddcfe398b8e5651cdffe0eb73c7547  ltk/specs/015-game-as-parts-source/issues/003-severity-aware-badge.md
+a2fabad5f8948c7ad76b29aed69c6289ab58c1650708005f67bd785133087d93  ltk/specs/015-game-as-parts-source/issues/004-build-the-overlay-merge.md
+ca459478e30c91afffc1fba2edefb2c2882d5277696673ec5ccb6876726837a1  ltk/specs/015-game-as-parts-source/spec.md
+805d765c3953f371454e65ac6a5657ccaa1ec1d8f90059a63a3f014892b5c63e  ltk/specs/016-audio-bank-conversion/issues/001-prove-a-converted-bank-loads.md
+e406c9c95661b9ef5a1e9dce1effde87a0480dba4a6d8160f7af655b3613282b  ltk/specs/016-audio-bank-conversion/issues/002-size-the-prize.md
+72b12e8b57c927d4c360178d63d12f23cfee7d68eb8be80b26658d1211c76e42  ltk/specs/016-audio-bank-conversion/spec.md
+4d087ae80d026929b3df5c159c86d7b30ef8717de9fffa419fa0ae20126ce950  ltk/specs/017-bin-object-link/issues/001-report-links-that-leave-the-mod.md
+777b355934f5efb559e7579ecda13db2d813d573af2414d8d156fe8c48da3a60  ltk/specs/017-bin-object-link/issues/002-index-the-games-objects.md
+8b323c834bf53f120208bfbe8de240596daf7fc250a285d2ec0f4fa9e6ea3a64  ltk/specs/017-bin-object-link/spec.md
+d27e6ebe7b4debdc4be7f3c39c5a2e0535e6e70d02c8dcbb49817ee42f93e77e  ltk/specs/018-crash-dump-fingerprint/spec.md
+0327283e008de5cf88add494dbd80d4cc103cc1087c7b4284ae0ee303e47f013  ltk/src-tauri/AGENTS.md
+f1de9d4d13d28e271c9b2aef482456f752fc6053466a27b74dfea6e135adba85  ltk/src-tauri/CHANGELOG.md
+025de46259f5bf709e69a704481b2a73eb87cac1cb724de9c1c699b1c17257fa  ltk/src-tauri/Cargo.toml
+e2a672247b8033ac3455a4e4699af703e1a1c847716c0d123fdb2f42e88db9d0  ltk/src-tauri/build.rs
+38b2b4a1f1b76a4e5037c5eb8e61034f8f2050165d4e372060a776639f951354  ltk/src-tauri/capabilities/default.json
+020130a8b7ef11aac1da9136959be313ec8fe846c283b089ec51fe39c89bfc50  ltk/src-tauri/file-icons/fantome.svg
+a02c0d468458e72d20b9559f5f8d682911421b0db6fe482468ef85ea883ada13  ltk/src-tauri/file-icons/modpkg.svg
+760d4b8a06bf7163dd010c33ad2cac9e4a75fa0177afaba042f83e311eef0c3e  ltk/src-tauri/icons/android/mipmap-anydpi-v26/ic_launcher.xml
+0687336f0ccc6f7ee09c7c95110667c63b75931238df779a21af401fb864cd34  ltk/src-tauri/icons/android/values/ic_launcher_background.xml
+e94e3076c2438156ceaf12e57316dafcfeaea39938cc3d3c9f0c2c42177878a1  ltk/src-tauri/icons/icon.icns
+92d15eddf8ad453b36def65dc6e2a75af84652129a739df417d1c80836dc0a7e  ltk/src-tauri/src/deep_link.rs
+a15d849d605136497163df9792ad88baf690286a703a207b53dd2877496ff580  ltk/src-tauri/src/deep_link/files.rs
+10565122d2a26db199f322928de5779ebdf470f612dc27dfa0361dad05f046ee  ltk/src-tauri/src/deep_link/files/tests.rs
+01ecf8df4283729b11ae77f27388dc2a3254cb6ab04a97c45f5846d1a2c0ea25  ltk/src-tauri/src/deep_link/tests.rs
+12f6b924d1b91e6c7e3940406030815d1a33f60e3aad1757785333b25f375195  ltk/src-tauri/src/error.rs
+058cf92455d089e312729a25f91b21f921ad25d72c03120fb68662247337adf1  ltk/src-tauri/src/error/tests.rs
+dea8b66f6b017de2451733ce6094c8a8a0a8770de4d997ac49606da578099085  ltk/src-tauri/src/events.rs
+15aa0d307c56d9d99f41ea04dfd0135065ee9f93a9a43a28469c53fe4cc0d30c  ltk/src-tauri/src/hotkeys.rs
+0a904d1384154cdddb6ed88e6c1a9ab14f63b06dfc8e9b71508e209ebd4d1e55  ltk/src-tauri/src/ipc.rs
+7fca2756b513da47535e3ef53aed24f70f86b5eb6ae0bad4996a5e54f8ab291c  ltk/src-tauri/src/ipc/tests.rs
+7e88569e84dcf9da2f87348180c6360bbf17b813f312d5bcd2246c1611016df0  ltk/src-tauri/src/log_layer.rs
+b475175ff3d99ddf90eaf521d277382e003e0b2406941d1f712d0b95f919bf72  ltk/src-tauri/src/logging.rs
+93f477202777870379b55d5133020d511a232ab8949a7122d20d2988420c2d56  ltk/src-tauri/src/main.rs
+fcf67f3e5900702c9504f6149733115d1d8e2d8316ad6530332fe8eeed7d65e0  ltk/src-tauri/src/mods/mod.rs
+5959e8995863c97950db6a0242b92817a38909022efb3f7aa3841ee3c36e870d  ltk/src-tauri/src/mods/watcher.rs
+8e6a3b5aca4843a3292aee4be1f5443a7786f9b15abbb2ab3fb191961813fc23  ltk/src-tauri/src/patcher/mod.rs
+a50f5fd210f4159ff453e1f32acd7aafe2a8eef2e6db6a1c9d3c659e79a5b8cd  ltk/src-tauri/src/patcher/thread.rs
+0740e7c18db91876060dc0604799470575d0a4c8013c000ff79a58fbf652dd2c  ltk/src-tauri/src/protocol.rs
+850429ce11c085f94715acb04304ea38471a85d46723995b4d4038cd526efaad  ltk/src-tauri/src/services/app_update.rs
+ef352fe14abed184d7c582b95deda9162c4bf8618a505583cc1c7b9640579816  ltk/src-tauri/src/services/atlas/mod.rs
+ffc2bcb2a8664b5324ef2a5423621e13c40ac3c4a6f3cea517e8f6ebfd65479a  ltk/src-tauri/src/services/atlas/programs.rs
+23becf4c9a3e022a8b7769245a0c829c6ce555279f77aa106dcf229fc56fadbf  ltk/src-tauri/src/services/atlas/sheets.rs
+ce2130b654134a29e13efeba306fc7a91f28ac87ff658c55423e73bd6c8c998f  ltk/src-tauri/src/services/atlas/views.rs
+2eabb50172d26bfb56916480bdcabd377fa9021f18195edd7248d6edf080d08d  ltk/src-tauri/src/services/bin/documents.rs
+b3a90bfd8041902a5c60c72dfe7f68e82760d010349dc00450b211b123b52f41  ltk/src-tauri/src/services/bin/meta_docs.rs
+a7a94c2dc2ff2520dc9d0d56bd26ccedfa32a1ef29bffb54bcf375d0751564d5  ltk/src-tauri/src/services/bin/mod.rs
+f48c2a1d4a4c0175a0d03e2cbab43700f88f0a832944dcca32f9ebce1c9d894d  ltk/src-tauri/src/services/desktop/app.rs
+1b590c3021773e85c6a2c9c9ec272ef54333be234f717582e2744bfda8ef1302  ltk/src-tauri/src/services/desktop/mod.rs
+460eebe613028c4611b4ca9e4ff25e15a866f2785b7ac2ba86ad35eab16b5ab3  ltk/src-tauri/src/services/desktop/platform.rs
+8b7c925eeaf98569df75156f4f7f4dcce24d0c4174dcc7efa2b19c933b1a4638  ltk/src-tauri/src/services/desktop/shell.rs
+19fa8466b704fc0184e9c37e9b57315a3378afa2d749b2f7c2fea58f16c45e9f  ltk/src-tauri/src/services/desktop/storage.rs
+6a483fee837ba2bc22fa179369c3a677cb927a192c8e0e4464e32b5b23ec21dd  ltk/src-tauri/src/services/diagnostics.rs
+1e3275f946cb6dfb16bb952aa51dbc394ada03beb7c6ffeca339aefc5931a1ae  ltk/src-tauri/src/services/game/champions.rs
+93ac7d0abe8dd278efef4ee06069959044317158d49600e01cf3187216cc4ea2  ltk/src-tauri/src/services/game/extract.rs
+ee7977b482529e032ee9993b695006ec4262f9e18677309aaddba13d43318147  ltk/src-tauri/src/services/game/hashtables.rs
+0b7f48b11d5a52637a1200c511f3d9e79871dad6e82c91696d99bf294c112b6f  ltk/src-tauri/src/services/game/index.rs
+00206e144e8951761e13b47bb0b9ef15393192364d4dd813f8dce749c98bdfbf  ltk/src-tauri/src/services/game/mod.rs
+70b24852d2e7088bc0c93483ded7d116d1d58f860dcb2586ae62e1eb257c74fe  ltk/src-tauri/src/services/game/strings.rs
+ea22521ee5687915d3f8a107f6f8437487df15baa4de9fb468009edad03df5b0  ltk/src-tauri/src/services/game/wads.rs
+82202009f2b6d90b94c274abdc5401cc763b7e3cdfe2c12fa0645031f22ee62e  ltk/src-tauri/src/services/hotkeys.rs
+1d4c4fcb78a09bbee4d09e8fd187219fbaa1aeb5361d3446ae710d4fe8a87d59  ltk/src-tauri/src/services/integrations.rs
+7b57aca2209134f9f41a3925d9a59621b190ede1231a3834b57ee6a98e0f2fed  ltk/src-tauri/src/services/launcher.rs
+47244fa08d85c1d1e5db3bcbbdfbdc4e29a591b2a72406a18480f5427e20e1bf  ltk/src-tauri/src/services/library/folders.rs
+0c242449f5779e1f29e77a74c4320dfb3297fe950afded2a80c8e045aec181e4  ltk/src-tauri/src/services/library/health.rs
+e2a332ca3b1e501e3d0d645a3a69b5e0655612d014a12e6d11b7dac97f0bfd36  ltk/src-tauri/src/services/library/migration.rs
+07b9e4ab82ecb907a869b133d436cd0b4637ff6b892844336478722a6c0007a2  ltk/src-tauri/src/services/library/mod.rs
+c45a846a5fa280e2971600bf5cb7906f1e6835a660d438e063179860b1c82225  ltk/src-tauri/src/services/library/mods.rs
+89f78a821f8e4377056f47ae3d3c0c5ff1cf29203a1fb1cb129fc8643fc559bf  ltk/src-tauri/src/services/library/profiles.rs
+4faff47f98ca4842616f615fffe102a004f395b6fdbc69d20864d08f9daf04b3  ltk/src-tauri/src/services/links.rs
+166fbd8fdb4d322ba45206888fa0e49ecab726dab35d780820ab8821e90623c0  ltk/src-tauri/src/services/mod.rs
+be79220558720764e9077a1bc0758ccaff20af19aa8c458e23017ef38f088098  ltk/src-tauri/src/services/news/mod.rs
+1b95ee850e5cd07bea9c16fdb621f7abe0ecf34ff54202ddbfafaedbd2a12592  ltk/src-tauri/src/services/news/posts.rs
+83e1251901fa7d456c705e4bf574bf72e5f43d8fbdbbe40e0a94732f1b9fe862  ltk/src-tauri/src/services/news/releases.rs
+9b728eb34fba5f1f28092ca2e4c3c69aee5d4ade9794492d9f58dde3edc94bcb  ltk/src-tauri/src/services/objects/index.rs
+8ed7de767b5a54fd367e67ec7eebe131fb8fa317e4edcd95f4b6c99922b0fa69  ltk/src-tauri/src/services/objects/index/tests.rs
+237ff8e521f521d80f20978a468517cccbfd3f6fc4c39cc049900fd650bcd6d9  ltk/src-tauri/src/services/objects/mod.rs
+6b4e94a6288b3ae9bd656a1322c31e6cef2299faf832ddcc770fd203bb14e596  ltk/src-tauri/src/services/patcher.rs
+910485899e085cae5423367ecea265d64ce756243476c68c1cbc0bec2b62984a  ltk/src-tauri/src/services/preview/assets.rs
+06f5fc862dc162bc1912b6f391739b8f0b46d90d0d20bfd1925b9762a83b6bd3  ltk/src-tauri/src/services/preview/map.rs
+ee5633ca4f16def888c40fd0cefc5eb4331b41727ddb80eb7b3b2c1b215183e3  ltk/src-tauri/src/services/preview/material.rs
+182b04bedf0faff5ab6c9f3a6d1eb03def2443aeaaab67f2ad5d76590db85285  ltk/src-tauri/src/services/preview/mod.rs
+6b3ec44998fda5d52241ec4a12246eadfbd60fced5cd652e49a811ba4b29a141  ltk/src-tauri/src/services/preview/ritobin.rs
+41c3f885124556125d2b1f7c371291bbc9b7f0b95448da16def4c7fe6c36bdee  ltk/src-tauri/src/services/preview/skin.rs
+5564e0d87e8fb6800f6f0fdfc894425c1b7b22a8c8833aa6985e42cb8d7cbca2  ltk/src-tauri/src/services/preview/spell.rs
+3471d98a8e648f2e742e20dfb5eea231899ce41514f21389410b87fcf1836bc8  ltk/src-tauri/src/services/preview/vfx.rs
+e23458d263289e164add1e393c91fc8e88a5eab8dabb21b9f96ba587e8d0f8db  ltk/src-tauri/src/services/settings.rs
+a5bb44eafd0d5b4483cb814bfbc0e63a9318e724ff7719c40a6432765a3f431e  ltk/src-tauri/src/services/shared/arguments.rs
+3e09de5737192d89374d09715dc875fc25d3377ce7ba5b88e4cc618fe7a1f41a  ltk/src-tauri/src/services/shared/assets.rs
+05141ca76479e7f0f99bc2b92421c5ff7ff022226c34641f5225ceb2165db401  ltk/src-tauri/src/services/shared/blocking.rs
+10d3f0bce74314df74452a50c35120a8d153bd400b75e0ad8cfeac3e8a8f4125  ltk/src-tauri/src/services/shared/document_assets.rs
+8ea913b192f240d886f9a73cfdf4994e2cc959a412c4a45818da6beeff0896d4  ltk/src-tauri/src/services/shared/in_flight.rs
+932029a023008717db661a8e50dd5b9ee66784691efe830234d335cace9e5034  ltk/src-tauri/src/services/shared/in_flight/tests.rs
+f0acb7d24ba9fba557efe898151a3336a272df708185d0f9d43cf4f4ca52264b  ltk/src-tauri/src/services/shared/installed.rs
+1c12495b128bb4e63510d94ac71c48b55d5523407c28ac2aa0ee626d3ae0f8d1  ltk/src-tauri/src/services/shared/mod.rs
+28321c35a485ee308264328c10c676a67a1afa3553def5c76ade2c1cc7295aae  ltk/src-tauri/src/services/table.rs
+9852ae08bbfe32c9fef90093147abe2d3276a26c8850ae557ff03978a410373e  ltk/src-tauri/src/services/workshop/mod.rs
+a2b4c8a9c59c3d9c10d4520ee2eee15378316fe54e0de02ad2e7ebf3984ea22c  ltk/src-tauri/src/services/workshop/problems.rs
+54879211b37d31bc595746b8772cb174629980ae507b2d5e3ceaddbb0282f853  ltk/src-tauri/src/services/workshop/projects.rs
+fb4a289b81d74e629f32498581bd50d49e3c80531520e598f503691165625126  ltk/src-tauri/src/setup.rs
+6c444086e4a4ad2622758ec6401b065501045701016df001c44d716557c1a8fb  ltk/src-tauri/src/state.rs
+50c1f5947959dca90a0837d096d93ef90653366cfd9e0de1049dc75656d504f3  ltk/src-tauri/src/telemetry.rs
+0f8a567d560d6b84b178e3ff74aede285ea048a5a58b04f25c72ded57c547f25  ltk/src-tauri/src/telemetry/config.rs
+570ba308984ff9e9f181ec5bb6160dcca0c8c47b536c1edc42446cc55f479e2b  ltk/src-tauri/src/telemetry/config/tests.rs
+344a3589da89267d7370f6adeef8f5f4818772366d20303c3afc4b2668b89a8c  ltk/src-tauri/src/telemetry/dedup.rs
+06b3bffc5bb10985c694cb16b1650d416b796ddf480fba28f63f363e5bc4bde0  ltk/src-tauri/src/telemetry/dedup/tests.rs
+bfa1d25259aed3aa6939b635364779534c709d54861670fdfd14346b9477e4dd  ltk/src-tauri/src/telemetry/errors.rs
+138fcffe72adfac1b25d7101282a57bfdb592fd180c5d2e6b072b04add6db924  ltk/src-tauri/src/telemetry/errors/tests.rs
+82cd5f6fcc9620e06c4ba4a4f337e47597bbe5b25750d35dc070a4d79ab07276  ltk/src-tauri/src/telemetry/tests.rs
+409054b1b44a25cde58e18e79fa294af69f990ffc752d1494b96fa6c01f51fac  ltk/src-tauri/src/tray.rs
+f4781831541e29a2b039384fc6702a312be86f631028bbdffc832b15b1b441fb  ltk/src-tauri/src/updater.rs
+c538be92f1fc902b1ae6f1b7aee46d4fd2818d5309d68254f2721746a460ac69  ltk/src-tauri/src/updater/tests.rs
+b535617de8dccb25ded244cbd033ace609de831e8b2a4c9369851247bc246e5c  ltk/src-tauri/src/workshop.rs
+eebecc1fe4a69adfb5f81d5a8ab2dff443ad4c0e32ff7ce0bb2dc4680ac4777d  ltk/src-tauri/src/workshop/sheet_sources.rs
+7a1d59eaa96332116eb531f8636f678e55b7deb76d4f8d614daaa279713e24c8  ltk/src-tauri/tauri.conf.json
+14cebcdd4d530d56a4e1a92e8fb48a157514cb920c306ddf19aa20009c78eaad  ltk/src-tauri/windows/installer-hooks.nsh
+2bcc894f1c46775195a552e4be1d94460614f1e2c03d872f70336c9dc114f01b  ltk/src/AGENTS.md
+b3ad7b9ad32f9b1ff76a110c8f2869e2b79b60497384413f7f407dad68f78945  ltk/src/__tests__/hooks/useListNav.test.ts
+42fb5c0145f3fdebd903752031c302fea89aa4506e880b049b6a84e901ba8868  ltk/src/__tests__/hooks/useReducedMotion.test.ts
+920ead79fb43052bd62cf27de418628e98d4d1ff2d890924c3b48948c773a817  ltk/src/__tests__/lib/color.test.ts
+1d3020b8fa2ab121a83424ee8df5270c3e6d48bef528609a320636541ad3fc96  ltk/src/__tests__/lib/crashReporting.test.ts
+01cfb05ddbc78465ec3baf41af92a0400a3b909a71366944afe56563f17e7974  ltk/src/__tests__/lib/tauri.test.ts
+f04f26a0008534b4bf05d14833e9990eb6184e8c8453b370214b1905a251e575  ltk/src/__tests__/utils/errors.test.ts
+691401303b3d757b5e7c4b4d3688b9dd863c4ec33030d77e23d0da3da434b38c  ltk/src/__tests__/utils/query.test.ts
+94887d84b10133b8c550d286a1a03295ad37ffacf521736086b2277d965f5d26  ltk/src/__tests__/utils/result.test.ts
+80b52db68a5ccdb94526a766b1d4a26b8807eaf9315604a20524e9b15b1c5118  ltk/src/__tests__/utils/slug.test.ts
+fcbc417de25fcc731526b99ffe9420e03d268c5e0a487ee2aae67acceeac12b5  ltk/src/assets/icons/BaseLayerIcon.svg
+a2a930983b8dd48b9e3563297e313cbbbafa7bdbf347fefff90d62de4bd6d75b  ltk/src/assets/icons/LayerIcon.svg
+9d9f34b218827a1c57a929dc702e3e62e2a0bdfd0a269fccf6ee15f5c11068e4  ltk/src/assets/icons/MinionIcon.svg
+72f0a7a57d3580337d380f3971aa84ae70e0304fd15a2e6fdca4fbb82fa27ed1  ltk/src/assets/icons/PatcherIcon.svg
+60898b25af0f0f1a8b636ccd4f258576544c4cbd945034a1a542b1e7cc53c6c7  ltk/src/assets/icons/PoroIcon.svg
+526c77762a4016d34fa2bfc628ebd73db8647a95c379f5181140d4b54644d358  ltk/src/assets/icons/ScuttleIcon.svg
+7dd97d95a310caf9bbe2997e5df8f6051a395dcce427aa818624e130d0b15c18  ltk/src/assets/icons/SearchEmptyPoroIcon.svg
+dfe3ec6a182d1c726102358bc43d745633c2a6a34c7357d3229bcb19d4b4852d  ltk/src/assets/icons/ShockedPoroDuotoneIcon.svg
+07aa7a8b99c9d7836b5a60a4d0d6628e8d2bfab30800ff2277a8131ea282be44  ltk/src/assets/icons/ShockedPoroIcon.svg
+3acd2ef39ab514dbbb7d6e231d3459bea107f965c91890fd2eb2778609bf28e7  ltk/src/assets/icons/SleepingPoroIcon.svg
+359ba3d2a5169c84791e911392292e89d8c5a89b8a4e8208c1c5a81e81f870c2  ltk/src/assets/icons/WolfIcon.svg
+b45533d7c496248c215245e395f1780a51837974dbeb9d97e74b5df75eb8a2df  ltk/src/assets/icons/game/AramIcon.svg
+f7c1581b0c448637ccbf90f785c7bbdf330707538d48d07a603561c69933826b  ltk/src/assets/icons/game/ArenaIcon.svg
+7453b43d720fcb0e092006cc66aec5f1e4264145c0ff3f68b86214e9f262bff7  ltk/src/assets/icons/game/BattleBoostIcon.svg
+fd26f12f9dc56133318ba7f1693830e85e81b0c6290e067189651aa0ef2e9567  ltk/src/assets/icons/game/ChampionCheckIcon.svg
+d6cdc63403da0ea825abf15e55a4f34e59b7256e8fb907508fb41492a455f1e1  ltk/src/assets/icons/game/ChampionIcon.svg
+9e46d585880f326bb152effeb385f39fb7da312b834b890e3bf2d787eb8c19cd  ltk/src/assets/icons/game/CollectionIcon.svg
+a723966bdf7d2316dbdb74930bb1f5ba1b28c6bae714e84df19605514a447fab  ltk/src/assets/icons/game/EmoteIcon.svg
+f7526ae8adb0ed5fb96f5f99ef7b2e728cd6a9123c091745ab49413a34d17728  ltk/src/assets/icons/game/EvolutionIcon.svg
+118dc818401651648d21c149db21ad95467924fb6490a1e3ee5741e5e92f4fe3  ltk/src/assets/icons/game/FistbumpIcon.svg
+c75556fdad21785f986877f0436349bec7d96210f8a193ab66e00ab9293fbe23  ltk/src/assets/icons/game/HextechDrakeDuotoneIcon.svg
+4aff2ec5acb61a3f896ad9c7256e5bfda5081520e157a2d3cfe3febea7f1e52b  ltk/src/assets/icons/game/LeagueClassicIcon.svg
+89e4d25f8388f7dc89b1f76305ea8d47684edb18d7fbb68f64223f605f36a6af  ltk/src/assets/icons/game/LeagueIcon.svg
+27cfb51a3c0f4fb4adbf310ee51062b0fa7053b3eff0f017ffab1d118fc75f4f  ltk/src/assets/icons/game/LeagueWarningIcon.svg
+f42e02ac1a79b3e860caedcd0fe24cc4eaa42b651dd16f873bbe84e85581a487  ltk/src/assets/icons/game/LootIcon.svg
+a702c1c43b3b81af24c35b262c6b055e92109ce0d9ff653e307a7e61aaed1c50  ltk/src/assets/icons/game/MaskCheckIcon.svg
+fe1fe524c295f154ae38120860747aa9d31fa45139d246cbd996191c5faea6b9  ltk/src/assets/icons/game/MaskIcon.svg
+b39e8089820adc4acc0a72a4eccc82238b9428c36f1337557906d696c8576e08  ltk/src/assets/icons/game/PlayerTitleIcon.svg
+1f5d253a13af6327526321a27aaa846d3b14a7462ee691a89026ecd99b48d6fb  ltk/src/assets/icons/game/RecallIcon.svg
+161454dbf6f4e14dd4b1e31ef6fc0d03b7db5571c4d9fb0a4e7053ffea04d2e3  ltk/src/assets/icons/game/RiotClassicDuotoneIcon.svg
+c2a21bb430fef9cfc3f2eb445cfbb469a7a0d6be5b9c40c11b4e6961ba7e4701  ltk/src/assets/icons/game/RiotClassicIcon.svg
+b873e3ec7eb26fb647e2176631eba1334e71fd8d8ccc9c1f903f6d77df540405  ltk/src/assets/icons/game/RiotIcon.svg
+6f81dffc930a8721991765ca5dada4e96967ac342ac5e7b23c52befeff15073a  ltk/src/assets/icons/game/RitobinIcon.svg
+6628a5a857ba3281dd065c12f956622eef9e770c60d9e54cd1b8367f157cc562  ltk/src/assets/icons/game/SkinIcon.svg
+d4950fba086a8ffc83a22c240c64a65a1a56eab6c8808458fc4514bd4c3123b8  ltk/src/assets/icons/game/SummonersRiftIcon.svg
+d6e2b283bf0a14977e2ef26e8b72a5318471569e8d5483d379e424db23be07aa  ltk/src/assets/icons/game/TftIcon.svg
+138e3f2ad70abb81c75e946540b0eadf63632be790468a80026344d2df686104  ltk/src/assets/icons/game/ThreeMasksIcon.svg
+2db2ec81c4a26b85cdacc1b2a007eeb9752899f983189ce28c135ad8f7aae47c  ltk/src/assets/icons/game/WardIcon.svg
+8f8c313ae58837beafc02b1a1af859ee214fe335ed4502a836eef948fec017f9  ltk/src/assets/runeforge-anima.webp
+14283151194ade670d43264851f29bb7c234d9d5c0da5d4880f9160346f5e0b6  ltk/src/assets/runeforge-ignis.webp
+e3e319219ad6dd634bdc57e4259914df2d969c7276f545dcaad5af32a9338315  ltk/src/components/Accordion.tsx
+004524e22888d6acc4820de2fbe93b132cabb17bc72c65bfa20cc5b46fefe895  ltk/src/components/AlertBox.tsx
+81fb7fe57a09ea34108d3fa2b99d492ee733ac8ff724e1f48fab717a1d3d8399  ltk/src/components/AutoPill.tsx
+74a5895aae8a393de3ba7b1586e18458e9731fd828f9cc89050b084fd53c3048  ltk/src/components/Breadcrumb.tsx
+1285b74e96eb239a4ce6af5ecffab8c3551dc9b2bbdb7eb7c02f85fb51720993  ltk/src/components/Button.tsx
+9e3c49603c60125aa7b5b3cad5e1009588af8f1c3f04fd01eaaab745836242e3  ltk/src/components/ButtonGroup.tsx
+edbb677b20e121dc2fc049453e922c33467b3b27a1f43fa44c633e414ad0a691  ltk/src/components/ChannelSash.tsx
+002f934b6419ccd5da054547cc49ee97218f5255d419df3775a72d9be79f32da  ltk/src/components/Checkbox.tsx
+fb25c29e4abdc1b90bdc7369e6773e697867df36f1958135d1323d7cae73d355  ltk/src/components/Chip.tsx
+0b7ca59880219d80f8765b7306faec6170e94e646ffc118458cc402dff07587f  ltk/src/components/Code.tsx
+171caa83940afef52c198732e52ad64f26b5feea36de3a4ec945db2034e5da60  ltk/src/components/ColorPicker.tsx
+08e949bbe3ab24e6c25a3b798a9df0365f40bb3353bc2f72e06aa04fb51e6862  ltk/src/components/Combobox.tsx
+1fe3cba9b87bfb4001796c76d5cbb7a1a34b25055e8eba10bf1e3dbb0b6cc0f8  ltk/src/components/CommandPalette.tsx
+89fc41077192e786c36a255eba7c46f0c17c9543af1ed7f02df5044253a1cb87  ltk/src/components/ConfirmDialog.tsx
+3bf6dce95f0326b8b317bfa51a130fa74eac518f4dc1d273c4cfc6c1366abae9  ltk/src/components/ContextMenu.tsx
+0a5cef1a29cfcad6f7a41bdea76d071f342854d7ab35b21ae93bb12c07ab9dd1  ltk/src/components/Count.tsx
+b53e8e3c94e4af5dc26aa320e31d63a48ffe2dc8336042304b84e617344a31ad  ltk/src/components/DataTable.tsx
+cbb1d0848339ab321e0c11e1a8c93e905ceccb1c68c9a5654103bda38b0ba3a6  ltk/src/components/Dialog.tsx
+66a4a8aca62d53e105f94a6205c5a953c47c97358c47d35afb046a6eb1e42bcd  ltk/src/components/Disclosure.tsx
+2b1cdc535f6d137026e6f4157ba115a69fe9eb81bac9b13b93276e4f3dcce7b5  ltk/src/components/EmptyState.tsx
+3dbfacb462321c2a62093e452bc204b02543981badb29dc261292efea402ab7d  ltk/src/components/ErrorBoundary.tsx
+7c71de48c375eeabcf845272245673434f614911d4be51c12f272253f0a4fa30  ltk/src/components/ErrorState.tsx
+99b80b4649d14264b346a137f212b74b6d6fc0677432b84a49a7d8670e22fe66  ltk/src/components/ExternalLink.tsx
+cd6920560777b73e63bafd317c132661e39f91a9ecd51fece6b23f11ce707285  ltk/src/components/FieldAffix.tsx
+6cf2959fcfb68340f4e3bf237921254a002b6377c9905268c3b5b5a0c86414e7  ltk/src/components/FieldDiscardContext.ts
+03662d24266ebcd3ce9a648069a9ef3179678d100c9269545f634b0751f87526  ltk/src/components/FilesystemPath.tsx
+9c4d45a8f52d4b556d6de3f825aeafec7e20d51ea2017aa3a84a728b45541951  ltk/src/components/FilterColumn.tsx
+2518ddaeb4649ac3caf88b6b820783d1e038744d1804f6d9804e585a7f336b7a  ltk/src/components/FilterOption.tsx
+9b366df9b3534954b96a9ed0193994adba5921a20e8014b4c2ab246658e11710  ltk/src/components/FilterSection.tsx
+cb293197a238d39259d2e6fe1698f26014de8ad4bf346f0f5140493e7fb3ec5a  ltk/src/components/FormField.tsx
+7b9376465878013b8e242a1bc7cb7b9105c93ff061c173253900eabfcfd59bd4  ltk/src/components/HintIcon.tsx
+d1dc267c43d8c68e82d8c099e59ced244ebe1bcd6cd24937de5b7a557695b2ea  ltk/src/components/HoverCard.tsx
+b96e9e9236fe012276efb0c01e8be433a700630d270e327bca4241443bd6bb6e  ltk/src/components/InputDefaultContext.ts
+a8193ac856382e27a2fbbda3e8db71f030708d2bf4577b83597753e3a5a26a0b  ltk/src/components/Kbd.tsx
+f1b06a2ced5f6c4eef11ef340401085fad62c7f0a0e1578e6423e800fd29e7d4  ltk/src/components/Layout.tsx
+624eaa4ef79d9e79d639aa221a70ff09695dc417c209c52ac7fd9ac8a43c9b4f  ltk/src/components/ListEditor.tsx
+6daaee9b77f404e576ae287e1b97451e88bb0bfd07b69932533f2401dc358abf  ltk/src/components/LoadingState.tsx
+032b777e0c698300b49cdab3d1e8706f4ed5d81e4696475bfd9c9d8b422be0ba  ltk/src/components/MarkdownView.tsx
+ce093bbf1be974685a19e22f08f92b24f67f0169a14472553fca9bb2331ddd3c  ltk/src/components/Menu.tsx
+ed9f3ea6619ac496a57ab19bedd09904f5306eb9808d0271c5cfdbcbe1a6207a  ltk/src/components/MultiSelect.tsx
+4d0a8aa97c5f3ceb4f9fbe1168e47666a00635d409a7ba6faf26fb1676bbb09d  ltk/src/components/NumberField.tsx
+134ef731d17f4979a809817d1020d953489ee1ebf484ae08c7c40381a9a8203e  ltk/src/components/Overline.tsx
+c32833dfa90bfbdfc2d3a08f24f3e69da1280f5ed6af5b0da7553b4f08a0b45a  ltk/src/components/PageInset.tsx
+3c504dd53351417a7001a7e193a918758fc280a91ec850bb097f7dc4dbcce3d4  ltk/src/components/PathField.tsx
+44e7b7d154127def1268d7030f11b3a6aab2b3fec22f8d0925b6b3dc25cdaeba  ltk/src/components/Popover.tsx
+9877ba06756131e34963bb6a3aa3232afe5b4bcdd58dc38d9beedc9cd7f64c3d  ltk/src/components/Progress.tsx
+cdb88e7c5d8973403e7943f97594dd47338700f301296b26ed81edbb0a30c436  ltk/src/components/Properties.tsx
+9fac5eadf36ad36445d30f350780ea272c54b25b914aa47c55523e7692238840  ltk/src/components/RadioGroup.tsx
+6e5b81e512cebfca1aec14c6bb43b1b7ccc198564a5b3188b9e94dbc59f1276d  ltk/src/components/ReadingColumn.tsx
+728a4a9184deadb0d12f2b8e72877d3a7a56af7d47ac5e0e264c5cd307e9576b  ltk/src/components/Readout.tsx
+3f7b8d0317102404692232b650263c81f891c0b5bc5fd0b0cce1a4e20c37615e  ltk/src/components/RetainedContent.tsx
+037a10145d9843f154026f31ccdcb403edc3743490441a34ece381563b01db4a  ltk/src/components/SearchField.tsx
+836fd2a41fe71b409be672e67de2538c7e9d60010c62d13539095934435ae611  ltk/src/components/SectionCard.tsx
+78ecffbb8faffe124dbf15466e0effd027bfc4cffce4f09e2fa0a5a0d7cba949  ltk/src/components/SegmentedControl.tsx
+0f080af9b8253f74590b5a1a34d720f3c616115cc0b2ea3767391368065c16c5  ltk/src/components/Select.tsx
+a4e7f47c68a9471ec1c74c49673ee8d2bb4dc0c11ac10017d9f67266cc4c64dd  ltk/src/components/Separator.tsx
+06cf2bbe7fe32529fd85b08ba0ce495d55f72a84cfdd2c93754eb8ae7967450c  ltk/src/components/Severity.tsx
+cbad393bfb6a98f82f105cae7ce59356a777b28d5da1277c70dd04496a3899f6  ltk/src/components/Skeleton.tsx
+8011b2f14660a9a1f8c5b6419bec2a08aff12b57e13a1f15a10e0df8b34e1c9e  ltk/src/components/Slider.tsx
+f8c74b0234dfbdb278ef9e8eac395d42582d2e8f9662db1b18c8ea23ee4eb8d5  ltk/src/components/Spinner.tsx
+de209ccc3dcf49a6e16c53760b5f8b96f0add165a45ea4a57372a48a597f2229  ltk/src/components/Spotlight.tsx
+07d53e1d59de5954ebdf67c22f08aa3ac34447f1fb58c164f9b29eac59891d2b  ltk/src/components/StepperField.tsx
+7d0b3114e067739835e723b3ed57c862ffda05f2d329c003161788f94670d35e  ltk/src/components/Switch.tsx
+58cf32696cd79667ce73c0cb1a43d3ab1fa85b543564dd3cb0502bc862f56f61  ltk/src/components/Table.tsx
+d0ad185c49b725b8a039f0324292786cd64a60894808fb4980a867a1f0eaf8e8  ltk/src/components/Tabs.tsx
+78bfe6eb83b501da60e998d362f499708163c334251cf5f3b68d9d83ed05e644  ltk/src/components/Toast.tsx
+754ab5c6b01cc514faf869001f7ff971d06089eddc714fa85e22030c6733dfba  ltk/src/components/ToastProvider.tsx
+c30136caba8ee056d639d48ba7d9f07e59a985d5de86a2a219646a53b7483ba8  ltk/src/components/TogglePill.tsx
+1fe44618c7914c7e6b802965abdc8a6457a85b6cb3b7281f25f010bec37cb96f  ltk/src/components/Toolbar.tsx
+9c77a85cb010632b41587ab1eb7c6ade9fc03c11190f0208a76b1ed4a3d6bb70  ltk/src/components/Tooltip.tsx
+f6a7d157102ac155ebfa79d827d50507946bd390c5f8f50fa8068b096e36ffb4  ltk/src/components/__tests__/ButtonGroup.test.tsx
+b896b6b3e3b8f3973ab43dfc2bd6b369301951aadfa70157e9fae773e3e17c97  ltk/src/components/__tests__/ColorPicker.test.tsx
+4f863380693c234b08724f0d7e5b11c02774c1a2c40730adc52c4b265b7a3dd5  ltk/src/components/__tests__/ConfirmDialog.test.tsx
+be9911721ce21367730456d970c792d9cbd37b122f8c96e601ce52fdf50ec642  ltk/src/components/__tests__/DataTable.test.tsx
+68e24bb9e208193658720b41ab0ef332f290879c2b0e9c49434a966364152b85  ltk/src/components/__tests__/ErrorBoundary.test.tsx
+725a1e4304de275844335e7887090cd8d33d7c405fc3ae421cdd539abce3d1fe  ltk/src/components/__tests__/ExternalLink.test.tsx
+7dd79d8f7a0f1bd74a9f74b9398703dd795e7c366767769b4189091831fd3f98  ltk/src/components/__tests__/Layout.test.tsx
+e0cb17630263d1cef272dc4e65fa4933048f8bde7bbef743c0a5a876fa7de8fa  ltk/src/components/__tests__/MenuSubmenu.test.tsx
+89db23c02f891a1057cd8f9da65b5689d5c78c10b5fb0ce5aa53c0a4e532a6a0  ltk/src/components/__tests__/Readout.test.tsx
+4d868009e815e8a3baed9721b6ebd07bea0ac5e6f1b5a8ff12d501f0142c96d2  ltk/src/components/__tests__/RetainedContent.test.tsx
+7c51dee9a83c4ed725d8acc5ebb634eef7bbff9665cfca36628b949963334c3c  ltk/src/components/__tests__/StepperField.test.tsx
+c26f370c50e8891ee004baf68b153669b201a66059ddcfcc4f0575b54676f017  ltk/src/components/__tests__/Toast.test.tsx
+a2bc7482c068a97aab6ec11bcd01edf7ccadf05e1e9916803566189dedcd51be  ltk/src/components/icons/AramIcon.tsx
+9da547c57f2c10b25aac0bc0da2b0db9264d2d482ed57e7fa9ecc92a04b551c2  ltk/src/components/icons/ArenaIcon.tsx
+573c0c016a10c5cf97d19ffc414c34d8b5d5ff2b8592bb3d7e1d44b945070954  ltk/src/components/icons/BaseLayerIcon.tsx
+497417328d4a041149b7233f0046380a1623f6caa3033ce14ea95111c7be2655  ltk/src/components/icons/BattleBoostIcon.tsx
+4cb4bb7a06c4366ae9a374c8dd5e9f7d2513496f1aa167b945e5ef27777c7e6d  ltk/src/components/icons/ChampionCheckIcon.tsx
+1c3714fca008521f0b5b00341c85f7531eeb70e12b4c9f95db82db292b961586  ltk/src/components/icons/ChampionIcon.tsx
+8c770c197dd4840a704935e44c2de5937aed341087ca6cdc46a6cd7fe7244631  ltk/src/components/icons/CollectionIcon.tsx
+d500985aab258c61834da817a422c6fa81b6618cf6de3c54f70ca1efc5226462  ltk/src/components/icons/EmoteIcon.tsx
+81dd450cbe86da73ec20eaf730275eefe09bdb8a76da09257e01f5ceba0c6a66  ltk/src/components/icons/EvolutionIcon.tsx
+df10621fd7a26134c7072b254f3316de3b11455dce7df7f6c56be2eff9ab11c6  ltk/src/components/icons/FistbumpIcon.tsx
+a6c6e44bf62d3620d24937af18467f56e7f3c1dfd71a347306221e325b37f1eb  ltk/src/components/icons/HexshadeIcon.tsx
+944e87167722d323bf6627ed2abd8520dd5fd1a3f3031a625fdbf3e4f5adaa0d  ltk/src/components/icons/HextechDrakeDuotoneIcon.tsx
+12dccc72b66f10eb289881231a078b5e17f2030e46125577cb0909bd7af32e4e  ltk/src/components/icons/LayerIcon.tsx
+5ec0a41ce75b588af94a774281d85a0f3275646f84518b931bcee449f3143c76  ltk/src/components/icons/LeagueClassicIcon.tsx
+864575e672b8b2b91cd12301d2f7a5f96f57670f6475cbe2d1cf113754a21dc9  ltk/src/components/icons/LeagueIcon.tsx
+cb5b5f0af26bf57fb768169b62d2354bc77d0bf4b3b9fa1e684d3965654f914a  ltk/src/components/icons/LeagueWarningIcon.tsx
+e84893213935274e8a97086439687bec821dd511af59229f5df04948e7e0b96c  ltk/src/components/icons/LootIcon.tsx
+f4b7e52e6055bb6e6bac6ac8360bdfa4e7274b76b7a20bc88c0ec2e7b202bde5  ltk/src/components/icons/MaskCheckIcon.tsx
+9bbcb97ec44e54e3363ea010a1fa0622b44e035b632ef07cadf2af707b9f75be  ltk/src/components/icons/MaskIcon.tsx
+5f5803cb591094c2d8bd8cb1332f9b976974bbbaa0af3dae073b995a02945638  ltk/src/components/icons/MinionIcon.tsx
+fecd79f8c53622d3a1ea55c232b1a1d44217dc4cc2350563dfea031d19a865ab  ltk/src/components/icons/PatcherIcon.tsx
+9ac6a01780b56bcb4c4b267b08564280e4793ef798e3039ecb892eca5202699c  ltk/src/components/icons/PlayerTitleIcon.tsx
+c04d73fb75fa81044cc67202bf2be71caf506438f33881fab20ba11e03198c08  ltk/src/components/icons/PoroIcon.tsx
+5e0c52ba0781173105ab43b3c155f8a618693bb6a573cebaf4b0085437c1fd87  ltk/src/components/icons/RecallIcon.tsx
+fea4c2e13fdf0d20171bb009ea79115fa0483043844434c84f935b231bd02835  ltk/src/components/icons/RiotClassicDuotoneIcon.tsx
+e5a19182a23bc6873ff4b78f1aeb230980c2b9c50f2d9cfc3a1e4c95f1a4dabc  ltk/src/components/icons/RiotClassicIcon.tsx
+cdeb88892cd2a7288255e90ab5f8d78b2b5c8d610459e822ba18756e7e3f6672  ltk/src/components/icons/RiotIcon.tsx
+13f0e481b693e410c6d95c81d26714c527eda0e20a2603a9910d262d40a7636e  ltk/src/components/icons/RitobinIcon.tsx
+dd7f95ddd6c9079de76b102ad01e9b88a50be6591eea6a1d138abcb002926f7c  ltk/src/components/icons/ScuttleIcon.tsx
+d28bf1220bfbf6177e1354457bb8e601e53cd612edaaa2bb36f72c9600bdf11f  ltk/src/components/icons/SearchEmptyPoroIcon.tsx
+6c72de66bf05c5ca100088c9024352aa3106cdf53eb78b53836f174b1a95c5b4  ltk/src/components/icons/ShockedPoroDuotoneIcon.tsx
+dcad3aa7d5674e07d8a9407349951f28af15c9225af4856f6030447b3f73fd39  ltk/src/components/icons/ShockedPoroIcon.tsx
+1aa515f099d5f48e77e32c35f5d5e245015a3320c28f8f3212e2d2cece41b032  ltk/src/components/icons/SkinIcon.tsx
+727009b99ba034f3dd4173933ff4eaf3185959bbaa1787414e0f188de1d42f0c  ltk/src/components/icons/SleepingPoroIcon.tsx
+5b79438e7b5e8ec478dba4aa49c27d8aff2b0b45d560d1157ecc09fcd1bba665  ltk/src/components/icons/SummonersRiftIcon.tsx
+8ef21c738a0ff7cad7054fd648dee57183b48f16bfaef83e6ea113bcf8fbbf2c  ltk/src/components/icons/TftIcon.tsx
+7f2db90f396e127203461cdcea232ce143b333bd732108b04004c6f82bda01c4  ltk/src/components/icons/ThreeMasksIcon.tsx
+b840e22bb73377c5f731d59de70476a810ebc237dea442e19260bfb1e5a5afb0  ltk/src/components/icons/WardIcon.tsx
+dac6ab74b019fba690a7e8c71e6f4b1576fe2655b1f0c38b1074f1278534dbff  ltk/src/components/icons/WolfIcon.tsx
+fa5c8261b9350ef50587ae45c0cfec0c43dd68ab0277ade24374adcbe601ee63  ltk/src/components/icons/index.ts
+9f237a0ad3433f74e52548ca5305368eccb6307dc637cfb3667109dc984224d8  ltk/src/components/index.ts
+b59c3edb0f9db0894783cd3ee468e165dcca43bb706a467daa87c3d8838971e7  ltk/src/components/stepNumber.ts
+431423c514d48981707cab0c393549e6807272abcb9d9846a44cf18cf5d724a4  ltk/src/components/toastType.ts
+3a614c16ee4934da6cb90d969e63581f19da46aa7650f02df356b270c2e9388a  ltk/src/hooks/contentVisibility.ts
+fe25df00e5893e15bb01b4510b3fcec6f8cfab44e6833e6367386e48b710d89d  ltk/src/hooks/index.ts
+6c1ed20294f7f610737c2756e6e63c8d97d18cf6290c303fdb96b77cadee5f28  ltk/src/hooks/useClickOutside.ts
+c5d4e6331eb23409867dd610033a1c20b42e1a6af1e25f61f03a02e45d462bff  ltk/src/hooks/useCopyToClipboard.ts
+c72afe6f61272b1cbf04880a831bcf2847ceb15f050f4d4b3faadc02f96ac14a  ltk/src/hooks/useDebouncedValue.ts
+622a95d52ca10a1efc1c52a8d8b9a2a2e295a15ec8231f52ac695a7aeeeed5ea  ltk/src/hooks/useDisposable.ts
+8cf6a7f56078a92027064b2702c88b63460ccb7b69207213bdf48f15b1b685dc  ltk/src/hooks/useHorizontalWheel.ts
+5bfa38cfd4087935dadab2fae5d93f670edb2a233b66565beda5fb6ea20205bc  ltk/src/hooks/useListNav.ts
+f3eb9cf588dc3526e8dddf23f0bc5561df6ee8abaf6664875f1de7aca6c3b383  ltk/src/hooks/useOverscrollSpring.ts
+1c50782d9169b7747ac121116ca509b17c8f9b24c1b619d4833169c64a64d693  ltk/src/hooks/usePlatformSupport.ts
+1f4e4be8ce7ce9119c6ec4e79666faa0b095e37f24d57d86c283721dc34922fe  ltk/src/hooks/usePrevious.ts
+5b0a404ee8639b59f9fe93f5c05c0c92e22c45bf23991919168ce291f3f01183  ltk/src/hooks/useReducedMotion.ts
+781ae70edfa96a2f4339221b6b1417e63f0e5c3c3e2f3ff74e3209cfa9d1ee13  ltk/src/hooks/useRemeasure.ts
+ee78847e438dbedb3fe95fbaf540062c41d90d93c1ec730bb3d540d63a4e3477  ltk/src/hooks/useReorderTransition.test.tsx
+f5d3c12cc9dadd7a860633885d5591262c58676e8d46cde47629ed38f90cde90  ltk/src/hooks/useReorderTransition.ts
+25b6dff7f6e682e645e74fc3232161051ae4a12d90d2450559a876f1db710686  ltk/src/hooks/useResizeObserver.ts
+e11818a2ba985763ada53e05940d6634054b4fe449432e1c0f3b3509c38ff052  ltk/src/hooks/useSurfaceLinkedBinWarning.ts
+d657a47698810821ff3daa74f67c5a3b3e0ac692d234a861318301a76b94804d  ltk/src/hooks/useZoomHotkeys.test.ts
+af680c7fee9b7b60976268e1e6ee8edc916239303f223a49594fe343ee8fbd4f  ltk/src/hooks/useZoomHotkeys.ts
+d1c5e6ff755eab4eb17f2410e6bf377af37f9ef751590924c0e001fb9177a338  ltk/src/hooks/useZoomedPx.ts
+ba54220cd4e77ad9b33393406be081112327e952f88dfa178dd2f03e77c611af  ltk/src/i18n/Marked.tsx
+dc319b7da9a20ba503b523c5e9263ea59a6250b361453a5e49ec6c8bccb5295b  ltk/src/i18n/errors.test.ts
+0be0aea77cb0c7d0fe72dcd5f4e5ee904b35d2592dda4fc203a1a9f69763220a  ltk/src/i18n/errors.ts
+a4aa5f05477e466887f36bc79470b0a783ef9d8c793f2e7373cbd443c49d5d21  ltk/src/i18n/index.test.ts
+92f4d33346f7181d8567de849050fbcf1155bcc9b8d775cd5e3d73437a48f362  ltk/src/i18n/index.ts
+d4d8931c32c4130b06ff49e7620de71afe5c9da5dc9b353bc54013b48003d110  ltk/src/lib/__tests__/assetVersions.test.ts
+9ea7aca0e9543539bfa1715571ad860a04b1fb1d5be575d785192edaa9f5fc1f  ltk/src/lib/__tests__/query.test.ts
+0e1e298b8451fa9f0728e40adecbc4df71d0ca3037f0923e759e87c2de8c90bf  ltk/src/lib/assetVersions.ts
+672389e18c330cba56de5be5632c067605f9e0db4ee4f96075deae217960fadd  ltk/src/lib/bindings.ts
+c1b598a869ae71994a6b2b1a8c87cfe5d37a8cc3b12dc274005ebabd005fdc5f  ltk/src/lib/color.ts
+d7201d0f0857e3bc14f0a37f4a977ff755526c746ce6ac49b2bb0c47098566cc  ltk/src/lib/crashReporting.ts
+74726b4375b31446ae5a895ad584fdad8083472777de4bbbdc932a69b43adc64  ltk/src/lib/fonts/index.ts
+d9a337330dfebec68fe20ec59c2eb14a8276bfa39e5216e00f6207d164b15e6d  ltk/src/lib/form/components.tsx
+d955a799c69b9c2713e52541e7c6dcb3a4596893f16dbe1c113d58b39f8295ce  ltk/src/lib/form/form-context.ts
+1836dc82146588451175f579e99010f945fa3a2bf72d1ac44b4401c16644fc52  ltk/src/lib/form/index.ts
+0233041c9e8718af625f15f5f4097d8ae0e15af940b5a8476f99998548d8f677  ltk/src/lib/ipc/appUpdate.ts
+63b89e911045e69f29bd56f155c2a2539b6d88dc68ed3b185a935e962f1765e4  ltk/src/lib/ipc/atlas.ts
+6c1bd33a2273c92529fa82b0fb4eeef0b8e1356212ea2a73f38d50f9f700ecdc  ltk/src/lib/ipc/bin.ts
+3c1f1fe0fbb7a3b09eb479c05878f57cdb5c88957fe3d96b9700d7fd94311b40  ltk/src/lib/ipc/desktop.ts
+00c48dee7efdbf3aa81bcd1c1cf373b9efba3eb5ad013acf476fbc77d4c4420c  ltk/src/lib/ipc/diagnostics.ts
+2740ecd2166aa21334f477e8ab783b7426e19045068e17a1117221c9cc8f1362  ltk/src/lib/ipc/game.ts
+9b206c42281a5ddcec22c950f6776d8ce04fe7afde239eef515b625fd9750f5c  ltk/src/lib/ipc/hotkeys.ts
+054a8b8be05bae4826b6e2031e1ce6a2a848fa3ff5e42314eadb72e42eca3550  ltk/src/lib/ipc/integrations.ts
+73a92ec759ef156c727a181cbc884506392c8b97b355d349fd377d7d3e28bba9  ltk/src/lib/ipc/launcher.ts
+46d8dd90a80658382c4d908c89b251141b0a921102e34269de9d2d0e90a3fff6  ltk/src/lib/ipc/library.ts
+9b54ad70029164f81b2f9c3732fad17e9f1250668fd255b4c27d1ccde801066a  ltk/src/lib/ipc/links.ts
+a7822497228475a653e47e59e46b57539b94f45c457c21ace3db5bf21d81e3ab  ltk/src/lib/ipc/news.ts
+073605603317beb6cc4a2dd6a33cc2c8e7a8770b91be19542d48f94dc5bc9ead  ltk/src/lib/ipc/objects.ts
+71288596e78e223f5afa1e6b6a83ab38a2c5a59ef6a36ae7735b53803a1070a1  ltk/src/lib/ipc/patcher.ts
+a4c6158e9758019a39a951a657afb6aadc280b521ed37cd7c6971ae227321d13  ltk/src/lib/ipc/preview.ts
+a1885faaaeca31c2d5c37bcc591bc1fa3e2ee198ad266d110512a784302728fb  ltk/src/lib/ipc/settings.ts
+2c012cdbe28af57f7c8bff6d61bf3a8265588e5cefed9c357e3b26c8f254a933  ltk/src/lib/ipc/workshop.ts
+d231ac8804750ea9022c19812b4611596813291b66fbe8957fb1db1341e69d77  ltk/src/lib/previewUrl.ts
+e2f8d6f51779dc35a743cfbfc6b4785208dfef35d667f0bef02ca87cf0dbc707  ltk/src/lib/query.ts
+e08c635b253820a7e5c4e2649e64885377acad5978e9a7c4e09252a1c5110637  ltk/src/lib/tauri.ts
+f52bda41ddbaccc8e221131cd5b1e7ab438120eff79dbd21d0d878fc1e3083a3  ltk/src/lib/useTauriEvent.test.ts
+321ed4e59084cf9e1ace1a20b499a965d81ea7b45f19b2dacf9eac09ab8bf301  ltk/src/lib/useTauriEvent.ts
+3647a632f9cf8f1b430657fd39110561faf028df4ffc68271a60bf3307c73b79  ltk/src/lib/useTauriProgress.test.ts
+1973736afd231081b6ad72174c92b2427ea93748738af54ce0a0da004bdbbd6c  ltk/src/lib/useTauriProgress.ts
+5800ac36daf4fab0d36a12b6fd1f2a1b5fcd53daa41074d3428d076edc90738a  ltk/src/main.tsx
+6dd94611a4a0b945b04708bbbc96a2eb0991178dd5b1f5657556995792bd3791  ltk/src/modules/champions/api/index.ts
+5da8e23d40386e917c8dd7cc05a3b404b00f689ac25a57ca0bf328ee0cf04589  ltk/src/modules/champions/api/queries.ts
+f4b452e914e5b1811857864d0ce40470eac74ab1a29ed0b2d20902264b193704  ltk/src/modules/champions/api/useChampionRoster.ts
+fcdc5c45ab70c43f8579f56d8900a2c313833b79647a5f483c067a08c79ed471  ltk/src/modules/champions/components/ChampionChip.tsx
+f15abe57651fdf65f4b968e8e78a0cb6e470d454d16cd26a6c12d08798b004ec  ltk/src/modules/champions/components/ChampionPicker.tsx
+8b3a3e9a280b76b46e0fd8ccd48463540570a905cecd8fa0a7e8922113c4c13d  ltk/src/modules/champions/components/ChampionPortrait.tsx
+c059cba82002761738b904c91acaf46ac79aeb9e8e200ccb9ad1e71bacf31202  ltk/src/modules/champions/components/__tests__/ChampionPicker.test.tsx
+591a76cc1cdc8fb1a6ebc020343636bfc28bfb917609085029f7ac483005bf0e  ltk/src/modules/champions/components/index.ts
+5cecd887ccc9e490c188f3905b437f05c4962d8c1d16f0ddf4db13f21d8a2867  ltk/src/modules/champions/index.ts
+24d5821983b5183c219616ceec55b06fa5383fbd04244c52e6c4395a8df37b44  ltk/src/modules/champions/utils/__tests__/roster.test.ts
+170b5569bda8a9b0cbed432ff4be8258cd492466e1c47bfe13bebb9fdeffd3f8  ltk/src/modules/champions/utils/roster.ts
+319a57f99ef9344545c45827a05d856165d83cd06eab5119cbc5f5e1fb7177a4  ltk/src/modules/deep-link/api/index.ts
+d71f46d88d7a9721066f26cdbab06a86c337ee7a9daf85a03867d10fb6628a4a  ltk/src/modules/deep-link/api/mutations.ts
+2c2cc9161d2305ee174e464922dc025d52cc736fc15532dbed1b5737752c302e  ltk/src/modules/deep-link/api/useDeepLinkListener.ts
+816a33a78b6dd9a1bf3a7032f37ac8f4f6c71238245ce29f19e28ed6fa2d1904  ltk/src/modules/deep-link/api/useProtocolInstall.ts
+0476df9eb2acd6490ef8095f3ae5cca22541430052263fe07b0d42e0061a19c4  ltk/src/modules/deep-link/api/useProtocolInstallProgress.ts
+8c86d9cac7e015b4cc232ec05c1bfc2b45d029f3d9f8f79c5c9878f6918b9a6b  ltk/src/modules/deep-link/components/ProtocolInstallDialog.tsx
+b275fff4c344c26ab589522b84b4dc5da1f392330ded1332f30f20a086694e65  ltk/src/modules/deep-link/components/ProtocolInstallDialogLazy.tsx
+25a3a3b5dee22184c2590dfb2e9887d30ad426f6ab216bbbf25fe3b5fc9a3f87  ltk/src/modules/deep-link/components/__tests__/ProtocolInstallDialog.test.tsx
+5d66b6dbb97e7bf05b8dcbdf4f21d781d8c69908ac5dab7c865dc4e9e059f64c  ltk/src/modules/deep-link/components/index.ts
+728e1093d92799a8bb2e6d39eae17079438ce96b3e794dbe4af12bc851907147  ltk/src/modules/deep-link/index.ts
+7f04c34c178d783e9077b088a88b13651a364c519dd1d71c3405b8f3f839e662  ltk/src/modules/deep-link/state/deepLink.ts
+760788483e897f87de1d4a9745a84921aa877383c03be26ceb455cfc00dc2c1f  ltk/src/modules/deep-link/state/index.ts
+ef32fd6ba0426a9307e310770551a31f9da916cd8e101d807ab63021db78536e  ltk/src/modules/diagnostics/api/__tests__/useCleanGameWatch.test.tsx
+ad6bd4d03c6f1d36fe622b7e2ee9a2c7e86ee29b505fc241c1e8267c74ee843c  ltk/src/modules/diagnostics/api/__tests__/useIncidentListeners.test.tsx
+2a17a8c474a0c450b3f1318e1c80fecd3f7adf0357100d9ee5fd7b70f2a5216c  ltk/src/modules/diagnostics/api/__tests__/useIncidents.test.tsx
+813f8e8b6156e40fc2e282cbb297b02a4279272250088dbf5bad1b11ca6bc4d4  ltk/src/modules/diagnostics/api/index.ts
+50aedf4dbcf30b989775b10a760485143362996ffcbdb8bcaadf6162e3977fe0  ltk/src/modules/diagnostics/api/keys.ts
+e6bd9f084048090542fc1a1a3aa96e342a49d33952314516859341d86eb9fb12  ltk/src/modules/diagnostics/api/mutations.ts
+d7bca13b51df2965143ed69f70809808afa3817b0b5e58e4b0d3be9e83798dc8  ltk/src/modules/diagnostics/api/queries.ts
+4f2499f76ffad3591b152be5c78bd99ba94881122e8da9e7c5acd6e7354fba30  ltk/src/modules/diagnostics/api/useCleanGameWatch.ts
+56bb6aeb14b666e7a017841bbcd359fd5d3673da15b7705cd69bd159fdbd6b39  ltk/src/modules/diagnostics/api/useDecodeIncidentToken.ts
+d395c00e4d730a7ffbf7a8443cee8c0aa11734c2025f5a3ab85b2b052e420fba  ltk/src/modules/diagnostics/api/useDiagnostics.ts
+e887bb896f9e5ff75d829f6988ed2d1b95f39beddfa8b606e48e918d23294a99  ltk/src/modules/diagnostics/api/useDismissAllIncidents.ts
+f8c6e8ad974edab9520a8fd4b101d766f5af2eeef24e3232f789086685286861  ltk/src/modules/diagnostics/api/useDismissIncident.ts
+d1b5a566134aa4b4a277f76c80eaeae11a54c28391fcfe9d5bec229fa18643aa  ltk/src/modules/diagnostics/api/useIncidentListeners.ts
+bcac04edbfc8f27e49cf7f37e1ce6275c37c47e410ba8951fbaa201c1a74c062  ltk/src/modules/diagnostics/api/useIncidentReport.ts
+ce45061d9faa5e48982362d0bee70f27ae2a0b85871a38d011385a7ecbdb061b  ltk/src/modules/diagnostics/api/useIncidentToken.ts
+7df9d0daec9e2af8fb39fbddedd37c07e2de1fc9a5af466999c2dd6c1fbeb6eb  ltk/src/modules/diagnostics/api/useIncidents.ts
+29a8c37ed855e6dc01cc1c6002a137e8192e0918bcad62a48b50fd801d7f4e0f  ltk/src/modules/diagnostics/api/useLatestIncidentToken.ts
+0085e5b68e7557ac54ca3e254b5b93500afb7ac2ab2793ddb734bcff846826cb  ltk/src/modules/diagnostics/api/useRevealGameLog.ts
+9c7042bc76bba1c19594e18faf6d0371dcdfda4daad5699d22b9ab6050b076bc  ltk/src/modules/diagnostics/components/CheckRow.tsx
+4f5007e097910c6ca1ce760fd800369bbc7bae56ff4199b67db7f58c2539c899  ltk/src/modules/diagnostics/components/ConsequenceChip.tsx
+8e42d32b94c010ce76f6902bdd1521a182cf28eb413a6297d7ec7970208217d3  ltk/src/modules/diagnostics/components/DiagnosticsReport.tsx
+0fe4956cd0ef567dd3d07e299dd4090963a4fbc8c906340e5ef9994696f1c557  ltk/src/modules/diagnostics/components/EvidenceTimeline.tsx
+4496121b7a7e4b182e533cc3f05f01cdc506ca12a71bba884410162fd36993a4  ltk/src/modules/diagnostics/components/GamesTab.tsx
+d132b48e8be5eac94ba64b907093cc81536f67b2646c0145d53cde431b7922af  ltk/src/modules/diagnostics/components/IncidentDetail.tsx
+53192607dfce7896e1bfecb7f62d2da040fa9ea24bd561146fa49dd31cbcc02b  ltk/src/modules/diagnostics/components/IncidentList.tsx
+d131d829a756020bf3a45bb0271ad1876a4c458aa42e918a1fd8236663fda674  ltk/src/modules/diagnostics/components/SeverityBadge.tsx
+e11fd34e97e17a748475958f5a99d6b0ac85e2e6e14f3fa4b517d3b8312dd5cb  ltk/src/modules/diagnostics/components/SuspectBadge.tsx
+8a6ef7b31417f82d1ec0dfe465ed4ad14e09767ab7f3032761d3088d7db6c19a  ltk/src/modules/diagnostics/components/TokenDecoder.tsx
+3ffc8c10189069ec5641cf27fde6253862c7d1e094e8e55b8bfadd4dc2b5ccda  ltk/src/modules/diagnostics/components/VerdictCard.tsx
+4e3349e3e366caee2f7935b734d2b0bfaa5c5cf73cc6c9ae4119771ede2a73f9  ltk/src/modules/diagnostics/components/VerdictGlyph.tsx
+67bdeb322b38eccf0f4011c878b1ee5ff65bc9722e2db633f6a9d0e61c2c604f  ltk/src/modules/diagnostics/components/__tests__/ConsequenceChip.test.tsx
+a233989843647467e4d91ef8dc3cded8d5a6b58d8beaba76afd825d7d1d77e16  ltk/src/modules/diagnostics/components/__tests__/GamesTab.test.tsx
+c9344b5d0d1913b03f1c62536ed17d38ba57df50a01f581f34789017eb9a296c  ltk/src/modules/diagnostics/components/__tests__/IncidentDetail.test.tsx
+be37850e56c54e42c7d2a0181714cbcf66d859d9c3fd733837f67a71626a96ce  ltk/src/modules/diagnostics/components/__tests__/IncidentList.test.tsx
+677aeb4a1525e4d194d9ff1c604f71dd7eea800d5dfb9d3e3ef923e1d606b6a2  ltk/src/modules/diagnostics/components/__tests__/SuspectBadge.test.tsx
+a06939539d914203ca4ee69a9426c6ba4e22cfb1bc31ef35f645ef3cb94a04df  ltk/src/modules/diagnostics/components/__tests__/TokenDecoder.test.tsx
+354829b45355a1a2320c55fb05d120befc0c5022612e14e39bd9052c94a92a34  ltk/src/modules/diagnostics/components/__tests__/VerdictCard.test.tsx
+f8b69addebfd8760f3736801e52a6aaa4a7f9622970937d5e7f34f67dc298ca0  ltk/src/modules/diagnostics/components/__tests__/fixtures.tsx
+c339e208ee795e69578834bd1cf908fb37cf1d69d16808b7fed4f07e3d6294e4  ltk/src/modules/diagnostics/components/index.ts
+7d0a1a8afe37a19c4466960c06315195fca281640fafe7619ce08f732d10ee50  ltk/src/modules/diagnostics/index.ts
+6d7c999e38b13fda8071da2cd7a4cfd8f161a1c0e96b9bf097878efdcd979704  ltk/src/modules/diagnostics/utils/__tests__/incident.test.ts
+1241b3b33eb09b733440a43792ed36f8295cc0066d98cdb0ac386856c164901a  ltk/src/modules/diagnostics/utils/hints.ts
+9b786bec50151e15162c9f0d01965f5920d5d31ef98bfa84982fdcfd15036416  ltk/src/modules/diagnostics/utils/incident.ts
+36f0ef92e1339375c18184e0f7a464784186c4c3bac35587894dd7e9e2452f08  ltk/src/modules/editor/__tests__/EditorSurface.test.tsx
+e3245b1d3c72b17ed1541c4ccf6c58f408720ec10c3ed4c0dd33a28371327204  ltk/src/modules/editor/__tests__/LegendBar.test.tsx
+6c3d9645d654211fb9bbc8dacdc12db9bda19e1154ada8c412f552b60f68b8a0  ltk/src/modules/editor/__tests__/TabOverflowList.test.tsx
+8c4d09e571bf4d9d386ed8999802977e2293bf0b5fd7ae9d422ffe981b17cf4b  ltk/src/modules/editor/__tests__/anyClosable.test.ts
+f2f8231e1fdf8928fe0713960edd14e78a263b1ab3c7ceaaf7bfe91df2972094  ltk/src/modules/editor/__tests__/tabTitles.test.ts
+5522fd2b37b8fcedded969f0bd03154dad4656f43912e324f6cc07865882172f  ltk/src/modules/editor/__tests__/useEditorKeys.test.tsx
+30a9cbf00ef121df053e6baf9aee3ca6ba52535500b04b7b3c2adf32a3ee5696  ltk/src/modules/editor/__tests__/useTabOverflow.test.ts
+c2c89a843cbe84f2c25e92dff36922bdc016538ae0fd783e3343ca7e23509b11  ltk/src/modules/editor/__tests__/useTextDocumentEditor.test.ts
+bab60365007d7cf53e12e742db94048383b8c3f092e9f1d151cd97fb4708eddc  ltk/src/modules/editor/__tests__/useTextFind.test.ts
+2732017220a97ea7e8c096e9cd745a915223cd92666242326284906909206e48  ltk/src/modules/editor/components/DocumentToolbar.tsx
+400339c26b45aac356a78da764face1b53f3ad15e5693f8757060c51ed2e3e1e  ltk/src/modules/editor/components/EditorSurface.tsx
+9ea249a8c7791308b9cc794947192bc05a1786a7669dff50bfed38ae35a76935  ltk/src/modules/editor/components/EditorTabs.tsx
+62ce8da9edac3057de4c53e00a1a3c0dea00fd47b65b03a46b21e10412df8172  ltk/src/modules/editor/components/LegendBar.tsx
+177d0c8c05eb1a7dcda017adba39893fc9a5a59f319e572750726c69e53b922c  ltk/src/modules/editor/components/SaveStatus.tsx
+56f26071b54e1cbef934a0704661968a5d89c426ca948b2d53be9f62ba0e92c4  ltk/src/modules/editor/components/SidePanel.tsx
+16b8cca00467c8c55184b6093fdbe7abb85890725522adea35435e319e841cb5  ltk/src/modules/editor/components/TabOverflowList.tsx
+9beebde717344c9013036938319109e98fc554d56e78889a2d3cf0ff4442d066  ltk/src/modules/editor/components/TextBuffer.tsx
+f60cc93b2e820e848082c37cebb85c15bd5357b040563a59789631cb555edd70  ltk/src/modules/editor/components/TextFindBar.tsx
+4c4e886815a7e8955f91c2a1b646dd508253b208a2b17903f9fccdec32f679b8  ltk/src/modules/editor/components/ToolbarOverflow.tsx
+3c1f3aaec81d250e327a192913af19578c5240b3c2d4f42dd87121f4b99ba195  ltk/src/modules/editor/components/UnsavedCloseDialog.tsx
+1b332186faf92267f9d80ec15305b7847f7063c97046fa68b8f20c5fc5bc8f07  ltk/src/modules/editor/components/index.ts
+a2a25204f4b63c5631da65e2413437ae44271929cc27c65d4e5cdbb0c2e91cd4  ltk/src/modules/editor/index.ts
+84bd48f461a2eb92bb16861394391922efd2e5a4567553b8328366706fc8c848  ltk/src/modules/editor/layout/LeafDropZones.tsx
+9195b519a59d02d92a416ceed7ac35130f04650d8703e500e72321f749a4fe65  ltk/src/modules/editor/layout/PaneStrip.tsx
+c5abc92feedc2d7db25baa42e2e5b7d6d837a8166404791120c6a23838f237bb  ltk/src/modules/editor/layout/PortalHosts.tsx
+47b5efd3a2d982262c0a9548ca7be9e715a1018e8df383c8162066ad4685340e  ltk/src/modules/editor/layout/SplitLayout.tsx
+ca680d46a553fe4b69f206a63bc06c17b05291e83c20d8ff912e498f8f734db2  ltk/src/modules/editor/layout/TabDndProvider.tsx
+d4465844e6ffe40062cc62c02598738b1b1b09671c9bbb900c87988d76d98fa3  ltk/src/modules/editor/layout/__tests__/PortalHosts.test.tsx
+c0bc3316d0999db9a0a159896b98c7b86ab027d6defa9d791a15090b92c9eac5  ltk/src/modules/editor/layout/__tests__/SplitLayout.test.tsx
+ce075e16fb0c5808e0a7c8cad7d794ca2bcd56ca660784ea5c0d87ee5e5767f4  ltk/src/modules/editor/layout/__tests__/dnd.test.ts
+7fdfaa45b10cbdc15c08f58bc2e7f0c1f379038ccd969800b13f0f5356cc4ccb  ltk/src/modules/editor/layout/__tests__/tree.test.ts
+10eb33b95c8478e97f13efddb43211ec42d84bbec2a6ab5344ce98697a67b6c1  ltk/src/modules/editor/layout/dnd.ts
+a11254037f7b22649df198066b029284206a1a3d860a29f53f8cf48ebb909158  ltk/src/modules/editor/layout/index.ts
+9399351a6b0148b1ee3fadac0ebad87aedb2c04cfb8a23d4677d3a51b036e9c2  ltk/src/modules/editor/layout/tree.ts
+a87d59e1dfc16dba9ea5d1fc3dc91020a38a11a9d542fedf3384667ba4bd4a4d  ltk/src/modules/editor/layout/useForeignCaretIndex.ts
+a3ceac23ed2b9de54e139764b48061996ed410f2a7a3bacb558562cba88eb069  ltk/src/modules/editor/state/documentFinds.ts
+4360450d9ad71423a17f9d19f0dc3962687d34804850c40c0eb4b80a13610af8  ltk/src/modules/editor/state/documentHistory.ts
+cfe8d125ce3b419c70c57c08babfc614419348e4a113c206e57c533f76e443d7  ltk/src/modules/editor/state/documentSaves.ts
+ed5b21b3eb024bfd7b974d6b32256033386a9f1de5a087f3acd5d5d90e027df8  ltk/src/modules/editor/state/leafCloses.ts
+9b640a8bd2108782538ef4876db9722dfaf6e5052149fa8b8edac004bba7f01a  ltk/src/modules/editor/tabTitles.ts
+9aa00dcede129498478bd3d5cf4469aebc034c516340d1f59ccaa0377094f7b2  ltk/src/modules/editor/types.ts
+c231eb2fa319d1ed90de473bc40e9f8c19ff7b2ef0d4ea0a878fd981d7d6af62  ltk/src/modules/editor/useCloseQueue.ts
+94cd79ef636c4484cdb54afef4b2e92f37374d009ff37219af32ddb612047077  ltk/src/modules/editor/useEditorKeys.ts
+c6f2782ecdf17a3a228bc998d20831afff751330d3ce1d469bb3fcee157db6b6  ltk/src/modules/editor/useNarrowToolbar.ts
+0dc5bac77651032edbbf8ca6e6b8b055c0c3f2029c4082a33128fbf016a347a5  ltk/src/modules/editor/useTabOverflow.ts
+63f4095cd7da90dec39f7349d4cbc1bea598601bac15913f325887a3928b54b8  ltk/src/modules/editor/useTextDocumentEditor.ts
+14df6affcc6a9ba28e065811bf5976839e0c13f486818c8bf8dc25740ebec384  ltk/src/modules/editor/useTextFind.ts
+6428c3f5cb511e5ede91576d79cdd88256b967f8604460fcd78a7da1af80aba0  ltk/src/modules/home/api/__tests__/releaseDigest.test.ts
+6c5b510187b95a528f5b9e4e2056730bf79d1f71d3bf0bebc52e7b6058ce4c8b  ltk/src/modules/home/api/__tests__/useHomeUnread.test.tsx
+4a109c1beb6ca109f12531c4a2287779dadc67d8055de2c167512d20b3d4e4d4  ltk/src/modules/home/api/bundledReleaseNote.ts
+656fe24b61adb79e1bb19ca25dbd9e4be30fda89bacad5be558bab8b838f6f41  ltk/src/modules/home/api/index.ts
+26777beab09263732a96fe729afe38589dab7151d12fa6494fa9e3616e6460df  ltk/src/modules/home/api/keys.ts
+faca70e5f506ca007b0c418673c27c331836bf448e9d4ddbd285203caaf8b57a  ltk/src/modules/home/api/queries.ts
+cd2532ace6b9f35716bb97efca330fbd7d092517010a0104a3cae682ed20b716  ltk/src/modules/home/api/releaseDigest.ts
+8d30685a9452000936e12718ff1687fdc2ee0551898096ccb3a1e68c7a843515  ltk/src/modules/home/api/useAnnouncements.ts
+b6558555c063c08043558242798c9a84fbb2835e0d67bb6b276929e4a0a5b4f1  ltk/src/modules/home/api/useExportMods.ts
+3290c70160058cbcb4b782e4a4b0ab5188ced66a4de25219bd89381641416428  ltk/src/modules/home/api/useHomeStatus.ts
+58cdcb4dfd1ca4499baec0ecb3cc4ad874980cbd27eecfd59ee7720099e2d0e8  ltk/src/modules/home/api/useHomeUnread.ts
+08dfa912e11d6ecdd06e79989cbdbc1204a9196f24ae06c7f59c8d15affd372d  ltk/src/modules/home/api/useLibraryFacts.ts
+cc786ef51172ac8e86c78cc5c0f02aad78b7f78c01a20370b24b7c05256f6493  ltk/src/modules/home/api/useLibraryHealth.ts
+98673a35b06d9b4baef2c9e6ab223bd8d47e163018d1d6def64d82c9f27ed2c9  ltk/src/modules/home/api/useMarkHomeSeen.ts
+6129478021a6fb3e69ef490242b6dd8f6d8a333b6b15c67d93b92216575bcddc  ltk/src/modules/home/api/useNotices.ts
+89a2c5a49beea7fc257da6210454471980484265e933178b218f3515f37e3d63  ltk/src/modules/home/components/LastGameTile.tsx
+d7e090d29faecf7d9ef79ce94a8473f1cb7239f6d1e67765d4b73b5b52719f14  ltk/src/modules/home/components/LibraryHealthMarker.tsx
+eb0850188d07f89c4cdc5aa2da5e2c4abfcaf15c068252767ac7f04c2149fe94  ltk/src/modules/home/components/LibraryTile.tsx
+04aa3f6dce70c8aff201a8459e2f5605f90a197ab467acf8459dc041d478252e  ltk/src/modules/home/components/NewsTile.tsx
+c19920cc84bd910b9513a4cf23e93642a0d3024157cbf3670eb07b3809a27758  ltk/src/modules/home/components/NoticeBanners.tsx
+63f1bb8d6d745e1b61e37d0e0b67f55361292d925e31ca0a1423509a9fb460df  ltk/src/modules/home/components/StatusLine.tsx
+124c59a60fa91a1711f98194d693e5df67bd8b11586207dc5106841dd7721432  ltk/src/modules/home/components/Tile.tsx
+5790ade0af7eb0fab7528cd3dccca3f2f7c60787dca74ede5a0b2f3c21aa2fdb  ltk/src/modules/home/components/WhatsNew.tsx
+6494c4348ff0a003cb2c237d9113db64200831fd4d28969807926ce76ed61a93  ltk/src/modules/home/components/index.ts
+728e1093d92799a8bb2e6d39eae17079438ce96b3e794dbe4af12bc851907147  ltk/src/modules/home/index.ts
+693cd72bffb2e3a65ccda42ddbee443227ae2f3495d1fd66933b3129f10e011b  ltk/src/modules/home/state/__tests__/home.test.ts
+9c79ad47ebfdd3c97bd998a687ffbed96a8f39c06bf5a863d1d603ec7fa7cca1  ltk/src/modules/home/state/home.ts
+2424a717523dc50c89f598173943b7ca7b583ce87e704c6f7754b76d5671fdc2  ltk/src/modules/home/state/index.ts
+b42e17398289e38a36ce695a9a5be53acf20f41df539cb736f6207ee40f9a54b  ltk/src/modules/launcher/api/__tests__/useInstallMismatchWatch.test.tsx
+0a92c8de43e69da547b9af0a0cc48ac91b0772b37de81f3756ce9d88ccdc0b50  ltk/src/modules/launcher/api/__tests__/useLaunchErrorToast.test.tsx
+7bf624d399f1eecaba7c44e6cc74b0f639897afda397e823bdb6bdef3cf64f6f  ltk/src/modules/launcher/api/__tests__/usePlay.test.tsx
+729b59ba07932f4337b6a9bbe35df770826f0639136862e1fdc6e4347a3b46b3  ltk/src/modules/launcher/api/index.ts
+3cbe917cf12a4679a18b87a32a9efe1b0a1f4fd30d66a7df032aa2eb855662f8  ltk/src/modules/launcher/api/keys.ts
+08b53a7683aa73318f2147852ee1f92f037b5827ff306fc790f4a440b3bad4fc  ltk/src/modules/launcher/api/mutations.ts
+d20d356aaafa526811b6fb79d963ac9383d3522f7a97366e8c169c51709b0680  ltk/src/modules/launcher/api/queries.ts
+c3bdb8ee14735c32c05fe5038c32f11bca4abd23ed5d1d9e5686a6a73191684f  ltk/src/modules/launcher/api/useCancelLaunch.ts
+625ffcbf39d26dafa442ab6d92cc6812d5f540d0fed21efa31e0858e51753848  ltk/src/modules/launcher/api/useInstallMismatchWatch.ts
+0b960b969890fe5379384ea0f02bd6ccb7da9619e8e03aa8d0b2063c08c02470  ltk/src/modules/launcher/api/useLaunchAvailability.ts
+f1a655af2b76d1bea5810860b4829541ae1530ad785c5bbc609b49c1c8f9901d  ltk/src/modules/launcher/api/useLaunchErrorToast.ts
+ec5c936fcbb366f1cf7a71fcc8f8ec5d6ceeb536d223849f6c0fa8e0a49e4eb7  ltk/src/modules/launcher/api/useLaunchLeague.ts
+994da7260ec3500eb471f28e7fcde40ba056dece12a8f557c73bf3a95b64ec6b  ltk/src/modules/launcher/api/useLaunchProgress.ts
+5cb1d4869b4a6ee5f969bbb13a2b1baa14861cffa3fac7e31ca758a2b5337455  ltk/src/modules/launcher/api/useLeagueSession.ts
+ccf1a2339b35ce1c26a5e59c22cb179f34802062efee31f3048a8dabf5e1f330  ltk/src/modules/launcher/api/usePlay.ts
+6c078fddf9252cf3db78e7b60f82bdfd86df772f2307de74988bb4bf97e28dae  ltk/src/modules/launcher/api/useStopLeague.ts
+f94f2b8ff228dfd7d0e96f5a1dd32829cc9a96558cc0261fa56481ee25995dbc  ltk/src/modules/launcher/components/InstallMismatchDialog.tsx
+8ef257f15773d30ac4daa494a6011c1520229f5f5590efe99f27432d0d722445  ltk/src/modules/launcher/components/PlayButton.tsx
+de1422e4dcbb33bfee8eb2c5fb260a2fc09feb7ec7ce68e75ffa6ab0e3530faa  ltk/src/modules/launcher/components/SessionBar.tsx
+83c0e7d28fd915cbfdbe1fef1c3c57d2d8a3386ca28c1434c0356ce5df13f3c5  ltk/src/modules/launcher/components/__tests__/InstallMismatchDialog.test.tsx
+e22a41bb6df3e05a69d12e40ae5869ef65b98cc805f57db860857661cf8c961b  ltk/src/modules/launcher/components/__tests__/PlayButton.test.tsx
+c238aaeb661a1a9e436dcc25c24276961a9e1170f8e69d284c86485a33d0bf29  ltk/src/modules/launcher/components/__tests__/SessionBar.test.tsx
+15407070876556df7e27ba9d9e6044b64e31fe39c44f4c79b8b4208d35340074  ltk/src/modules/launcher/components/index.ts
+9d3dfcd9ce25b31600bae1de824f81f9f49d147b5dd353e5e09d23de072511de  ltk/src/modules/launcher/index.ts
+045f1c3b7e0bfa7d7e62bf85e40e090d5f340f669e9e7eb95d75b1fe684ec9ac  ltk/src/modules/launcher/utils/__tests__/sessionView.test.ts
+8203c7f883072c99d66ba3219481387716d45688f258550c31253c12ebd1936c  ltk/src/modules/launcher/utils/sessionView.ts
+48378ae1f7600395217107f037232596e7d8c2c4625f8daec92606b253aec9f5  ltk/src/modules/library/api/__tests__/modMutations.test.ts
+0f88ed5d9c48b400f8e7d2f6d7af435286d37d9062eaa31bbbcfd89802629ef1  ltk/src/modules/library/api/__tests__/useFolderDnd.test.ts
+a75f4c0cb1dfd884c524428f8ceb50013bda06e84374515bb75d83ec32da9888  ltk/src/modules/library/api/__tests__/useLayoutMigration.test.tsx
+67d102e7534c73aeaeba785a3d05f7c42fdd26eb9e8e2a6aa3ed0b2ebe6bd157  ltk/src/modules/library/api/__tests__/useModStorageToast.test.tsx
+3576425ce4f24bda7f5a2da8f07578c4cc60bcbce88f289759ddfef4f9d54e5c  ltk/src/modules/library/api/__tests__/useModThumbnails.test.tsx
+8d29ace0d98e3cc1484ca632d281d6e8ddb221cbfafe902d2574a99f86630bd9  ltk/src/modules/library/api/__tests__/useOpenedFiles.test.tsx
+8d4832fc6f504ef2d51edae804111d172a63461e9cee0970920618125923cd2d  ltk/src/modules/library/api/__tests__/useSetModStorage.test.tsx
+d56d8006506ac1c1839ef60de80bf432f55e8a701c55c5bfd9965061cfaa5b05  ltk/src/modules/library/api/__tests__/useSetModsEnabled.test.tsx
+a94fc6d121148a892068bd05e1f08687782f5bb56be45b5ee279581c6174ebff  ltk/src/modules/library/api/__tests__/useSortableModDnd.test.ts
+fc564bac39e9d6c3b2406d35e601ab0cc01665169ea3a781c605fb77f0764a04  ltk/src/modules/library/api/__tests__/useVisibleMods.test.tsx
+0c097f0dd960c3e061f605f7ec318d6070e0b4b6980190de9bb846bba7e49efe  ltk/src/modules/library/api/folderMutations.ts
+78f72776482380df57afef8c1ac01fd4d2b18fcefbfece13b67dccdc3a3758ce  ltk/src/modules/library/api/index.ts
+7d94c13dbfc32cf83ecdf6ef2601d3e50cb0fc3be59e186fb9b88c0b8d291127  ltk/src/modules/library/api/keys.ts
+3505fad9ec33f31ef3dfc3d946080aace3a35231bf17b68640119fef7b52e083  ltk/src/modules/library/api/modArchive.ts
+39ce5a8f77e512f0253d5a56c46ef39fecdf204bb3965a961204433b31364842  ltk/src/modules/library/api/modHealth/__tests__/useHealthVerdicts.test.ts
+192aa877c3da71558a1b08c6a7f080086da3aa1a6e0196124a6822d8a18dfe96  ltk/src/modules/library/api/modHealth/index.ts
+21b67885fa2a859e2f2eb554526ad5657c80fd25d6f2d09bbff1388b790c40dd  ltk/src/modules/library/api/modHealth/useCancelModHealthRun.ts
+2fa9a35b3d9899385f121c4e4c87e908bb767ceaa88bbda08e2d99bddc932e75  ltk/src/modules/library/api/modHealth/useCheckModHealth.ts
+bcc458a44bb551046c9b0351238bfbb1034db62df5de966db192e4e91d4de532  ltk/src/modules/library/api/modHealth/useHealthCheckReadiness.ts
+5c5efb74cda564fb9b8293357cb1b7ed8ccdb230a821d49e083579006691c286  ltk/src/modules/library/api/modHealth/useHealthSweep.ts
+1418ff6ba2c96265b635fa9e7565d6a113235b311b016b9a0645da801e9b3bdf  ltk/src/modules/library/api/modHealth/useHealthVerdicts.ts
+38b5639fdf1d49470b6ec46d5c33da890b7a98739e557db3c34d6b645f8fcaeb  ltk/src/modules/library/api/modHealth/useModHealthVerdicts.ts
+82b8a02604ca2663c9eecd1ca19e2952b08004369688ad355c56b54166b9ad5d  ltk/src/modules/library/api/modHealth/useRepairMod.ts
+7add1965ea4b679b6e6d7f44566ee63dea7a55d64ff933e5509b9cc558093839  ltk/src/modules/library/api/modHealth/useRepairMods.ts
+48820b779058764cd47ab1bd9d1a1270703274599e85f51c810ea052ee01148f  ltk/src/modules/library/api/modHealth/useSweepModHealth.ts
+361dc4d5075dac5dde75befddc47bc71ef17f4ed83d8b86e0c0d1c89234f10ee  ltk/src/modules/library/api/modMutations.ts
+886c7d600f63ecf7661974e0ef72dff93acedfd13f602398173ceeaa6d920698  ltk/src/modules/library/api/modOrderMutations.ts
+8126789facf067009a43c7626acf9a1daeb1e3e576d635b85c57adbdafd0d861  ltk/src/modules/library/api/profileMutations.ts
+ede2afc3043c5498235217e11136dcf057743f26722779c4580e9df8748abab1  ltk/src/modules/library/api/queries.ts
+f02155057568f1718f13fef0fb3740f3908eab4c5bbf3d7bcbf4a98edb2e3161  ltk/src/modules/library/api/useAnalyzeModWads.ts
+9510ffe7781a0bec498493c07661a3259fded4abf07014686542246566ad898f  ltk/src/modules/library/api/useAnalyzeUncategorizedMods.ts
+4235d080b3a6295528a491d5d00a539ad7b5d4cecb151a9e3e9a6c3a57aea63f  ltk/src/modules/library/api/useBulkInstallMods.ts
+2aaf515dd553e2661315cbac5176ed181586cda69614f8e1427468d38afa957f  ltk/src/modules/library/api/useBulkUninstallMods.ts
+ff444f22af2c5b47719318fa67092808839da838a89076683495f1f8b6c61c63  ltk/src/modules/library/api/useCreateProfile.ts
+199b310f2a386e8ba55175dcc3d9b83a2dc2351bc18a04aa49c879c012eb8afe  ltk/src/modules/library/api/useDeleteProfile.ts
+1cbd2e3ee4fb4ee6b140e168a0b20b7f733c051854db4f6d490a1327e024bb3c  ltk/src/modules/library/api/useEditMod.ts
+9189a034f67820bc9245587de7c041e2250de8f1c493f4d1556d1026b3c1773b  ltk/src/modules/library/api/useEffectiveCategories.ts
+f01e509e60eb15a1b04201e28563793458a8649eb7c0ddbdf179251a5cb2b1b9  ltk/src/modules/library/api/useEnableModWithLayers.ts
+86b6018766137ea5bdc3475f3afb6826a4af320c2d7506f083a84388783f4ab5  ltk/src/modules/library/api/useFilterOptions.ts
+8a6358d924262f5716c3a5a2080dc6a2e7902c77a657ecdf81022cce32234de5  ltk/src/modules/library/api/useFilteredMods.ts
+a281f7ab28314d9058d82b3207ecce16b9b5d3de72d06b8dcb3736222a43515b  ltk/src/modules/library/api/useFolderDnd.ts
+6b241bdb6173d70da0eb4685d5498b8b9e952ce39f1780fdf66895e9b2dd4b5e  ltk/src/modules/library/api/useFolderMutations.ts
+d124dc6d0ff38e5575e6c0e082c8769a21a32a4ef121abccfde8e6e24af8c4ca  ltk/src/modules/library/api/useFolderToggle.ts
+9a320f42c50d5be68e92ace164c74eb25db64cb4250ed710cf1e0149223b49ca  ltk/src/modules/library/api/useGuardedStartPatcher.ts
+8583b738fd4e49e12ab7ad0b9b55f9597a5271a43ab9a90b145d418358b17f01  ltk/src/modules/library/api/useInstallMod.ts
+7dabb1aca4d136934fce3f02a3c8b125c60347713377045133aba74e2e070a89  ltk/src/modules/library/api/useInstallProgress.ts
+70e64f0760a8bb5330bf702979d2619e9e24e99d2b9459e462c70669447e88c5  ltk/src/modules/library/api/useLayoutMigration.ts
+ad0abb596dce006c77767d433cb053ab98e895e1136192bf70cd91d23d0ad1f1  ltk/src/modules/library/api/useLibraryActions.ts
+b131a74d6b8f86dcd8738e6f0e9f62fe02b55c3c0b2c1904c6e81e8798d7e437  ltk/src/modules/library/api/useLibraryContent.ts
+bfa1bf2cbfdfe0fa8ae4756414533ea5cee7e2777ccc34d6d2d1942eaf0186a4  ltk/src/modules/library/api/useLibraryDndSensors.ts
+9eecb67f98aa1ccb323f3a9a2a649a878dbcc9f8dc345d93dcd6be859d200f94  ltk/src/modules/library/api/useLibraryHotkeys.ts
+acd4fc19734845bc5068f060779d46a0d28ce79490d66c0c93bcf9f2e6783ca7  ltk/src/modules/library/api/useLibraryViewMode.ts
+a66af536c57b812b96cd1db746a98dad0b3b6efef653fe69b158734d72b8c2e4  ltk/src/modules/library/api/useLibraryWatcher.ts
+b5a6e3ca0e4424e7059a12ac6fb01ccbd5b38f66a607eab3168c6db83aebdf12  ltk/src/modules/library/api/useLingeringSlot.ts
+f7d33bea8c342293ae2cdf73b8afe8ec006b8275112ccf05f536078afe4593fa  ltk/src/modules/library/api/useLinkedBinOffenders.ts
+68cee1f499f893040e0b6e03c2faaaf6e5666b70f6f7b5c4f6b7a215a67a113e  ltk/src/modules/library/api/useModChecksumMismatches.ts
+e623a980e3696ac9c75b4927b53a064afe3ef20844ba34a1609e9cfe814f3608  ltk/src/modules/library/api/useModFileDrop.ts
+68ab4ce29e46909818f62ce04f786e86145b4da6f3a083f1ef714f244727af75  ltk/src/modules/library/api/useModStorageToast.ts
+450b75139caf8997b0cd0533ecf006c83377baee7125976e10c52efd58677cb3  ltk/src/modules/library/api/useModThumbnail.ts
+233d973e6f475b674df1cc9fb2dba45958e23a44c2bcbabe9c8a3a433663b33c  ltk/src/modules/library/api/useModThumbnails.tsx
+733c4fc6d032e98a38d518506c403af102c1a59530729100efba5bb8cd3d90b7  ltk/src/modules/library/api/useModWadReport.ts
+f6f60bc05e942a11a729eb540ec8bb68b5bb9b71f5158fb6a6f5a03ec74c658b  ltk/src/modules/library/api/useMoveMod.ts
+022228e867a87c423d91d04a59078aa8366716de34cb690968fcefb26af11041  ltk/src/modules/library/api/useOpenedFilesListener.ts
+1d33707825306bacec6d218c63839073eb8436f319894c293f70d41877f99493  ltk/src/modules/library/api/useOpenedModFiles.ts
+ef269e7a660a4e921ebbefb69ec62b258112aa4f0278c41848619f0290291860  ltk/src/modules/library/api/useOverlayProgress.ts
+50634915bbb640f4a2b3ac8e9f631311ccabf28c29fb487dd2f08462da0d32cd  ltk/src/modules/library/api/useRenameProfile.ts
+49db206f313b1824e1e03acd0bc914fc3a1ec9a8e06d1bf3eee3a9717f8a0231  ltk/src/modules/library/api/useReorderMods.ts
+2bd824501e9c73fb41bf0baff4e6d57d82aa499072e6ddddd5885a1727ef1b07  ltk/src/modules/library/api/useRootModDnd.ts
+f78875b978804b46b20580146294902b45513a751d4fdee0302a8add678f9bbe  ltk/src/modules/library/api/useSelectionActions.ts
+ac2d21861f1de5cab0c7ce6e5ad3368d93d11f8c91da49478a59dbbaa5518160  ltk/src/modules/library/api/useSetModLayers.ts
+56e208067f5a8b169c6ccb818c74157f39dde213d077c2adf02b5546fa929c77  ltk/src/modules/library/api/useSetModStorage.ts
+778d022db9696eab4b346ff5ae0ee8f5073fbe5d5d0f89843be2741095a66231  ltk/src/modules/library/api/useSetModsEnabled.ts
+c3fe448a29326e255c88532e79a12c638d62bd422a22952e0904701728faffb2  ltk/src/modules/library/api/useSkinhackFlag.ts
+4358b72ded79848a4168c0c420ad73220dac0e4fbd7a982970665aff790dd05c  ltk/src/modules/library/api/useSortableModDnd.ts
+6b2642eef9ac926c603164f538c4ecb4b1813a6e802832acdc006f4885e0d58e  ltk/src/modules/library/api/useSwitchProfile.ts
+554d59502a4d84adae7a26ddf0bae1432bcc9f6ffe7c8d0544c717bde5218704  ltk/src/modules/library/api/useToggleMod.ts
+444a4893c0cbc5efd20402dc3473ac0eae0061b615ed2f47bd4f4a0a787e53d2  ltk/src/modules/library/api/useUnifiedDnd.ts
+123f1b0ad6b7da72267e82e650df064741ec69d9655ae938d0c1e733a99c89dd  ltk/src/modules/library/api/useUninstallMod.ts
+ff0c8665c16ded704c52192c560fd88afe97ff5de093abe1276e4b758f71ecd4  ltk/src/modules/library/api/useVisibleMods.ts
+e9ec67afac7b5ccf071df825746f0e49765b30ebd1ce68ec4d53f5cc639c4a48  ltk/src/modules/library/api/useWadScanOffenders.ts
+54f40a2673e14d137d8292f731f6bfd7a0137fffaca8e659d0aa8e9e345dde19  ltk/src/modules/library/components/ActiveFilterChips.tsx
+831e98ae25ab1db3e1f9d735f433055a4c06f402f8cba47566f0208a16cdaf32  ltk/src/modules/library/components/AnalyzeUncategorizedAction.tsx
+4582d0af7cf287e49dc2c65675da1f10f3dc9275fb84628daebbca57080de326  ltk/src/modules/library/components/BulkInstallProgress.tsx
+cec138d5c075495aa25ceb1e3e8b999fa51fef174d47027182f47127f3d78cb3  ltk/src/modules/library/components/BulkInstallResults.tsx
+549d2f8a92ae487a9484a0c58215ac8ee9c1e62342e307843bbdf95cc978751e  ltk/src/modules/library/components/BulkUninstallDialog.tsx
+21fc37179eaefac63807b9d5572e8493068cf9546324dd2b93d7ee92bd9dd7f5  ltk/src/modules/library/components/DetailsCover.tsx
+9c61f4cfac9d78f6403e7a23d1777a9f387f02f3833b85bfd8ced2b26d2a5091  ltk/src/modules/library/components/DetailsEditForm.tsx
+ea85f189b58145504af14fa3e5e591f3d10922995bbae70492b313eef6aeebd6  ltk/src/modules/library/components/DetailsTab.tsx
+43c7d79f4dfe83bc34005d63b0484a7ed3d10348c18163a6fc1d645c90989a3b  ltk/src/modules/library/components/DndDragOverlay.tsx
+db47cb30e5c1bc451c650566c7f48361f53412c7f650e5d774c0abb1496cbf4c  ltk/src/modules/library/components/DocumentBody.tsx
+9d8b5e7105935610cbc6cfc9051da6160eaead510bb55933d4d29a850041a15c  ltk/src/modules/library/components/DocumentsSidebar.tsx
+5adb5c31db970db0e52703199516e756f213e8066d2e2ab5a1875b5ca7c2f237  ltk/src/modules/library/components/DocumentsToggle.tsx
+8d18474ed5acfd40fd9f04d7ef9ee326bfa3887611a7f3ebfe92c9cc591d7f32  ltk/src/modules/library/components/DragDropOverlay.tsx
+c1fc9569e67347c2f76a9e66e100f7fbdb67a0f6f53635f9d33523523d127c34  ltk/src/modules/library/components/DropLine.tsx
+235d5056c07a97f107ecbd3995a562dbb2e46f96803b0c2e9adbd8ca8e4a941e  ltk/src/modules/library/components/DroppableFolderCard.tsx
+2ffc34cf0af94be7f3a994537ac9a9390715c5086d7972725b3e4cdbd9000f69  ltk/src/modules/library/components/DroppableFolderRow.tsx
+608f860a0990dcc606343108da2bf22a2febe8633ef5182253dcc41c307f59f1  ltk/src/modules/library/components/FacetFilterPopover.tsx
+09eecc79c8940a9780e9d72d78c1c899a53c662d8237b495e9d3b4dc76ec1da2  ltk/src/modules/library/components/FilterPopover.tsx
+7e5015a796f6d85f41e45c9d57513ad9741086820f60cdc5eb5d31e7f2fd0795  ltk/src/modules/library/components/FolderCard.tsx
+d9714d3d34418b19cfbe25d5e3715d83e070a1c74bd80db623836776771a68c0  ltk/src/modules/library/components/FolderCardThumbnail.tsx
+80a7b265a17c5abdfa4441a97b07c40f91143d1db145505a98cd0ea37cf248cb  ltk/src/modules/library/components/FolderContextMenu.tsx
+a0a8706cacc0b6a3060b6bacab3ed3dbdcb8607970285737306e57bda1da0c4d  ltk/src/modules/library/components/FolderHeader.tsx
+bf80aadc82f686081c0cd07efc798899bf9532669e07a5a9bd9749f55419eedb  ltk/src/modules/library/components/FolderNameDialog.tsx
+41895e80045d0243c37552e8b891f2c63805682f563817c56047116508deca15  ltk/src/modules/library/components/FolderNameForm.tsx
+d27a182768d6895180e7c1222f1dd2c43934901108b664370545fb897c88f70f  ltk/src/modules/library/components/FolderRow.tsx
+bae7f338d510e673d54e0d1ac3c9cbb838d678ac9c8414d18a8151d1c960992a  ltk/src/modules/library/components/ImportProgressDialog.tsx
+c68953fa558912c9d31757c1dcf2c092472379c4b4491cb0db8f31bddc3afcd1  ltk/src/modules/library/components/LayerPopover.tsx
+7163dd34dc595c89b2376633e520b109935333b9ddb853858c67f20019f0d886  ltk/src/modules/library/components/LayerToggleList.tsx
+50ca0660f94406490adca265f494cf01e2b982845a799b84772713a73044a120  ltk/src/modules/library/components/LibraryContent.tsx
+5cf2a47510fae64cf2356a8eee73ae9f707a6721d5ec0ffca77e120b827b7d92  ltk/src/modules/library/components/LibraryContextMenu.tsx
+f5b01b1231e3ff85532c30d635bf8bdba72d7b8af33f41d8a714ac66ee17b8d8  ltk/src/modules/library/components/LibraryDialogs.tsx
+940439d491ab47e25723f4e4338fa315b73e4a69afbb855a6656c87008bde261  ltk/src/modules/library/components/LibraryMigrationDialog.tsx
+2cb7bd8f0496c8107349e1f561ed461b6c98de564233029aa142e69c8fce62ca  ltk/src/modules/library/components/LibraryStates.tsx
+264dd5d62063b3303002235de545b9cc489bf42bcfa3f21fcc0b7e9880525929  ltk/src/modules/library/components/LibraryToolbar.tsx
+f51834c7f554676986a155efbdfaa6d143db5687bc58b6790f15e640f948ee22  ltk/src/modules/library/components/LicensesTab.tsx
+73727bdcbe96d487f60a3c8351c03cf3f704694b6bf98c03ff166672e063481e  ltk/src/modules/library/components/LinkedBinWarningDialog.tsx
+86d9a43572b19ad47d6dc81393eea43c71ab94ff1f245f8ba6bc2659150d8a0d  ltk/src/modules/library/components/MissingDepsBadge.tsx
+83b6150c5fa68ba41c6cea0026b5e1040710b5455554f06fb8d88a8150179f07  ltk/src/modules/library/components/ModCard/ModCardGrid.tsx
+7dfdbef5258a804230c726f50da17ecb1079f870e8d7c8c3a4ac0117ca113754  ltk/src/modules/library/components/ModCard/ModCardList.tsx
+ae5e63e797e8f686cd27a27ac5c2ae78baf504e52b69f6fa1122765307eb142c  ltk/src/modules/library/components/ModCard/ModCardParts.tsx
+a493d16c4ad727c156e3a9254ee3d0941e961b8214121aef59d856ecb4e87a5d  ltk/src/modules/library/components/ModCard/ModCardUpdateItem.tsx
+a2ed75305be64f19082147c44addcd36dd59b12e39ba60989ae60530b0112dc8  ltk/src/modules/library/components/ModCard/__tests__/ModCardContextMenu.test.tsx
+4829a5dd23d135d37251b36ec87503c96cd7525025c3f522e7bb8748d72384da  ltk/src/modules/library/components/ModCard/__tests__/ModCardHealthItem.test.tsx
+91ec94e2b0310ef263459dc240f7fffeddeb33d495daea811323e6e653965dce  ltk/src/modules/library/components/ModCard/__tests__/ModCardMarks.test.tsx
+dbc215c6aaa59c44accb0758cf6b990ed4d06060f1bc7f0aca0e67414823f67a  ltk/src/modules/library/components/ModCard/__tests__/ModCardUpdateItem.test.tsx
+fb2730d668fb869878fda3638829075a6ca6db31aa4ecf2ff22724af99180cb7  ltk/src/modules/library/components/ModCard/__tests__/ModPills.test.tsx
+9f92ee52c97eed524d8d8861468fbb89d31ec51d561c0b26854c644a250b7e68  ltk/src/modules/library/components/ModCard/__tests__/useModCardController.test.tsx
+e519336f2c1d03321c08d8863f5c81d7ab3c29acf2f7d5e344710f2c20633052  ltk/src/modules/library/components/ModCard/index.tsx
+52b490d6fbc550a41528a31e830cba314daae068cfdf9f1a33a145933de3c638  ltk/src/modules/library/components/ModCard/useModCardController.ts
+7d0935e44b7af0ee105ad52ace5775cefd776e9a1da5c7811e2df4d58018606d  ltk/src/modules/library/components/ModHealthBadge.tsx
+201ac935747b754e3cb1311658ab01c2b1e7f31d6162fe00a1253d4ab0490abb  ltk/src/modules/library/components/ModHealthCheckAction.tsx
+282d3efeacff131a9513a31f407f8514f780d898bde570627a15dc8a4af31574  ltk/src/modules/library/components/ModHealthLaunchGuard.tsx
+e1a4393ad1db110241b61d9b0982c0f98c5e60243f6df9b0a363c6039a7e70eb  ltk/src/modules/library/components/ModHealthStatusItem.tsx
+7e09a319bebb262b436aafc0cbf624fe429458be4a89034ca23c54dc052d4ccc  ltk/src/modules/library/components/ModHealthSweep.tsx
+1444053710b5514ceec0718d95c4636a93aa79782109eeb6ad72b37c590e492c  ltk/src/modules/library/components/ModHealthSweepDialog.tsx
+51cd35bd63e2998e311bd96e809ed9004da177c63dba398a2166497968edbf9b  ltk/src/modules/library/components/ModHealthSweepDrawer.tsx
+42547dd074306f6af9a19ae3fbf6fd10ee447efc72991670f0a87e023e653232  ltk/src/modules/library/components/ModHealthSweepListener.tsx
+b81451c6e588da2055ba52ba0efb5bae8b19bbaddd91e1a2613294517a05854a  ltk/src/modules/library/components/ModHealthSweepPanel.tsx
+c01c3788c707c1524ec683b44c59d3ed5ffb45b189f6eec69ae08b7d793cc1b0  ltk/src/modules/library/components/ProfileSelector/ProfileCreateForm.tsx
+f403f3c16f743ce4d1fbc4a786288089c6789df5a64733d6dbb6aee118040e50  ltk/src/modules/library/components/ProfileSelector/ProfileDeleteDialog.tsx
+16f31828e6d23f42661e1b2486e277c963a71c22625e5364a582a746a49c0546  ltk/src/modules/library/components/ProfileSelector/ProfileListItem.tsx
+1a69c5111f92d4b75b71dc576da47732994f8f06c5d27f610a9ed42d26aac6aa  ltk/src/modules/library/components/ProfileSelector/index.tsx
+f3a78298e64209cf2a16629cbb322ded789436a98631fe8d5c2a58c9b75ce81d  ltk/src/modules/library/components/ReadmeTab.tsx
+9e234b9c7712ff164ecee6e0c596065e54c1e750ee6aa1552203e83e70d58ca8  ltk/src/modules/library/components/RemoveFromFolderZone.tsx
+237b4b1b643feddb5da7fb75304e7e1c003fdaf808925f0a92a3239f6ba19290  ltk/src/modules/library/components/SelectionActionBar.tsx
+87ac7237b82266d6909e1f8bb897a4a1190e4b3782cc927fc217f409163ed926  ltk/src/modules/library/components/SelectionButton.tsx
+bb4c93c0152766db316a5a02d0ab070c660c1965b370689aaff79c3c9d08ae25  ltk/src/modules/library/components/SortableFolderCard.tsx
+9e16f460d11c57016ba8d6244f35fa8c1407cb04d81bf6895940bb07d0386491  ltk/src/modules/library/components/SortableFolderRow.tsx
+218d188ef61cb9f9182bf3b1f718d8216b7743a3386f2cc54519d156086049c1  ltk/src/modules/library/components/SortableModCard.tsx
+df9ec75e0066411ef53a279c30ba506c1fea1d2fb7fd5abcad5f85d232a2b63c  ltk/src/modules/library/components/SortableModList.tsx
+c7b2a0805d57b5530e574430cd89712c7213db4fc6de743d481e9d1a1167c8af  ltk/src/modules/library/components/SuspectModAction.tsx
+691d151a4ce0855a9d9374f1824bf081fc0f927d712d130b1a70b42674f85cab  ltk/src/modules/library/components/UnifiedDndGrid.tsx
+cc63bbebcdcdf7b4d8659a07bdfc6ec28a7902704898da57b73f0091f115342f  ltk/src/modules/library/components/ViewOptionsPopover.tsx
+f1370d17391967a515dcc823e2f333d6fb89a66b412f422813ff1dafe9f83b5e  ltk/src/modules/library/components/VirtualCards.tsx
+2d79a6e87c185e69da56172edae035e781fb155462916ead960e4557e5d2de26  ltk/src/modules/library/components/WadScanFailedDialog.tsx
+4579788bef81053d30f1b73ffba14df78c3843afe3c1ebdbd2c461142f12b420  ltk/src/modules/library/components/__tests__/DetailsTab.test.tsx
+a3c01acafe1d30c48e620e8536c678385639c70a1ff1b0ea0aae79a1af44c788  ltk/src/modules/library/components/__tests__/DocumentsSidebar.test.tsx
+5426dc717bc43c7752f736f1433e175f64cf07da997df6daca035cea5a0ab629  ltk/src/modules/library/components/__tests__/DocumentsToggle.test.tsx
+8aaa7dcfcffb26f3f66b438ac0cd0f282416ba29decc04884623916309ba9e08  ltk/src/modules/library/components/__tests__/DropLine.test.tsx
+8634884a61576e83fa7338e8d2c36c87b6613817ecb9868b0dddcee3f5c1b4e0  ltk/src/modules/library/components/__tests__/LibraryContent.test.tsx
+9422c6eefa93759977e0a5d3e1fa57818c0823165a81cbc786aa9cb6f79509a2  ltk/src/modules/library/components/__tests__/LibraryMigrationDialog.test.tsx
+fe8174670254e071b97ab79f8c7ba48b328e28de68a994494dfc243918f60254  ltk/src/modules/library/components/__tests__/ModHealthBadge.test.tsx
+5d3ab42ef7be62abbf01848c480e5dcd764be99f4c43219479e09cf1a483989c  ltk/src/modules/library/components/__tests__/ModHealthCheckAction.test.tsx
+1e78dfc32bff60c89a808e01aae7e2f22b779bce1cb6af396fb6a132d917820a  ltk/src/modules/library/components/__tests__/ModHealthLaunchGuard.test.tsx
+49a5a24262347813a7716b9d17d7bf643b9fd51979f5e4f8b1ef4b53b17c36f6  ltk/src/modules/library/components/__tests__/ModHealthSweep.test.tsx
+8473ef8d958ec84ad69b44b3acddaffa9ca22c82ead84b8b87ac8e111a4c336e  ltk/src/modules/library/components/__tests__/ModHealthSweepDialog.test.tsx
+ff43f7f35cfa1709cb615ee06b173a731cd0f6c61a0c7028aaa6ff41705837ae  ltk/src/modules/library/components/__tests__/ModHealthSweepDrawer.test.tsx
+b27dffca514d33edbf6f1b07e482d12ea235a985aafb27d2a5f9df362e701854  ltk/src/modules/library/components/__tests__/ModHealthSweepPanel.test.tsx
+bcc1afd10bc46829a1b5e29fd7e4a3184fe322126f0b29f6fabf3621eb9213a4  ltk/src/modules/library/components/__tests__/SelectionActionBar.test.tsx
+8a8487bc7cf1e37ceaf758b83ccb233e3a80320d84cb2e998b7890b75cce83ed  ltk/src/modules/library/components/__tests__/UnifiedDndGrid.test.tsx
+1001d8ed7f9ba7f712b6ad51e133a2882a9f666159d6a54b4a02b5850cb3bb75  ltk/src/modules/library/components/__tests__/VirtualCards.test.tsx
+e9baa5bdb20a12d0d7357f0c319d130ab41755848729136aa90a5a0c350348e5  ltk/src/modules/library/components/__tests__/modHealthFixtures.ts
+5cde33151ad024acf6a3b18dfdd4fd297d59a703e3044af87ffe93dec966bc6d  ltk/src/modules/library/components/index.ts
+00fe11cc496854f3d3f3416a740332f127a2a979c3541da98c93b43a9a61f0b3  ltk/src/modules/library/components/modHealthNotice.ts
+620b2c1f36e1825fcf0bd367505418272773f0af9b182d9d7f458eb0f159d8a4  ltk/src/modules/library/index.ts
+673a63b85e05a422b4a491bafb94b39c4c4112862b6422b11555cc808d1ddfb5  ltk/src/modules/library/state/__tests__/libraryFilter.test.ts
+7fca7c1b0ee3deee288ad39d8c804cfc9ad1c744c2decb068748103aa78a875b  ltk/src/modules/library/state/__tests__/librarySelection.test.ts
+58061f8d49abfef983f5bebee920683279849f6c9ce8d0307d1d93541ef737d5  ltk/src/modules/library/state/__tests__/librarySidebar.test.ts
+57d4b7598c3e288522618a4c50e34eaf762bf717d9f7ed8d850fcd0e5bfa2d4c  ltk/src/modules/library/state/__tests__/libraryView.test.ts
+080db6a3f36a45defaaa378b0db2cece003d87bb65635c858c955aa3c0bcdaf6  ltk/src/modules/library/state/index.ts
+af316d7d956a63575b29c1b994d2accc181cd4eb83405848b929c419775ad9a6  ltk/src/modules/library/state/libraryDialogs.ts
+422869caea68ccb479e25932bc0de7eb9482e348f8d8a315d3d0618eb5d4e67f  ltk/src/modules/library/state/libraryFilter.ts
+2f3742727ab22a4dd2db3741e020c12bbbe267d56306eafe415d7923f02fa87a  ltk/src/modules/library/state/librarySelection.ts
+8ecfa5fd9006656232b4543f2ac372d6195b5fb981cc4d200b86c09107417c29  ltk/src/modules/library/state/librarySidebar.ts
+de82bae4ff662fb08d72ff893cd1c5da5b3405a5451d32e6565d10b92defad72  ltk/src/modules/library/state/libraryView.ts
+ec9b3bc0c0ef9668382c8128b92d15ad8554b72c962c703fb81165102d41b72b  ltk/src/modules/library/state/openedFiles.ts
+57e6149b4b69125391c0c84af31ac5d1f88f7d7b350431a13fef1b03132c32ed  ltk/src/modules/library/utils/__tests__/dnd.test.ts
+11026dc83afe28e20149da749ff2d2e84e6f062bad7a5a3c33e1adb56a0b86ef  ltk/src/modules/library/utils/__tests__/folders.test.ts
+2cdf9da788bfc37683090c6ace62c975065c98149ae62217cdf2f849ccd753b6  ltk/src/modules/library/utils/__tests__/sorting.test.ts
+0bbedbbf8f07ecd9d0d7df217d485ce18eae21bd3559ad84b1dc07ec2d30927d  ltk/src/modules/library/utils/categories.ts
+80667a12548331300b003498a5a7016bebe217c62683ebcc605620e2367d5b6a  ltk/src/modules/library/utils/dnd.ts
+63368abab107dc12f3be69288daa348de14ed57fad44ccaa52b46288782d99fa  ltk/src/modules/library/utils/filterIcons.tsx
+988285e67b81ef81d4b1635ea8e2583b5cd76091e7d44feed783180beedbd880  ltk/src/modules/library/utils/folders.ts
+253980bb9c7b043621984ff857dcc177d45392a0769d215de0268ba22a00f14f  ltk/src/modules/library/utils/index.ts
+923c14c175e7b722ab7922f45f2bc31d6564e800170fab0469fa65b2c373cf48  ltk/src/modules/library/utils/labels.ts
+fdef8b835936cf6b37fc36e193b6b0a49b8276096a7e69b6d01f26a7fbe375bd  ltk/src/modules/library/utils/skinhackCheck.ts
+0161ec9d90025102d5d2a1a1e52eab0d6b38105dcb5b3504d7a2895658e68939  ltk/src/modules/library/utils/sorting.ts
+1dff168a36e7747efcd2d090c2144e9ff3f43c05e087850d71ba9df1b15702fc  ltk/src/modules/migration/api/index.ts
+2d7ad471366340e4cfd82d7489ac1026b840715920f9b711f47b8d11d70fb287  ltk/src/modules/migration/api/mutations.ts
+50214dfdeaa3d14b98cc2a0a699db1b36bbf4336451e33417935f4f09905fcc0  ltk/src/modules/migration/api/useImportCslolMods.ts
+5d934dc1df2b3c6d1f0d32269822052c18d8e051848bda97d67ac77883bb7335  ltk/src/modules/migration/api/useMigrationProgress.ts
+e1a05b4d09751177dc3ad8c29ff741713b97c1107522b636a8c00bf73a8002db  ltk/src/modules/migration/api/useMigrationWizard.ts
+5aeb0b30dd239da04ab4ce683e7ea673b90ab78d9511dceced9caee7f799bbb3  ltk/src/modules/migration/api/useScanCslolMods.ts
+36ade1d9d42189af44b0afb40611a2afbfb1fcd0598c2c738541460917b0319e  ltk/src/modules/migration/components/MigrationPanel.tsx
+62c242cb0ad0cab80a5d8cb3bab25f7e2a5aa937af51ef682983f04a6ef7d516  ltk/src/modules/migration/components/MigrationSection.tsx
+ffdc93b7e67127123334338b79c5f1fb46d16372a0f0ee2608e19cab410a69d3  ltk/src/modules/migration/components/MigrationWizardDialog.tsx
+225dc89b59cad9ecd21ebaf335374f9f84608a5c50189d1d943b9a3e0a9ecfd8  ltk/src/modules/migration/components/index.ts
+358a86ef47514014e7f62793b3599cf0f79f1f07e2bd8403a45ac16b3e93085c  ltk/src/modules/migration/index.ts
+f04841f8832c96c0b4d6bbfa34fd8b9578b921632fb5f986bacab7dc1f4c2da1  ltk/src/modules/patcher/api/__tests__/usePatcherError.test.ts
+555803385c06c6e2add7a832e1433f0bb312ab4ce401365f6ee35d73d8fb360b  ltk/src/modules/patcher/api/index.ts
+127ea95b43ad1a173b6a0234d9a8d0b54c8b047968821945f07ddc5632feb9d2  ltk/src/modules/patcher/api/keys.ts
+18e176f281f8bba86135e99235f5313264de279cf0912dc63062a389190f3f6d  ltk/src/modules/patcher/api/mutations.ts
+ddec7423d9d716f7b03e28933e357590327e0694353fe98d946d2363b4e68c34  ltk/src/modules/patcher/api/queries.ts
+3b82b53ba117ac9b92c2a5c86e3933a1533a8da4d70ac7562328c740e10d3989  ltk/src/modules/patcher/api/useClearStoppingOnIdle.ts
+55d3008584b878bc21171d040d074f4cd9905f80666786e68558924d223eedc5  ltk/src/modules/patcher/api/useClearTestingProjectsOnIdle.ts
+09743118a07e4687f7ffc637e40fed177b79245488e8d542fe2d4b23f6f0241f  ltk/src/modules/patcher/api/useHotkeyEvents.ts
+136cb4182285af3c2738ef53bdbdced0317e35424ae52cacc2caee2529ac31bf  ltk/src/modules/patcher/api/usePatcherError.ts
+63cde1405acc84c48017f31bf1bf679a3cba52e963831c5aab32f5ee52422492  ltk/src/modules/patcher/api/usePatcherStatus.ts
+e62c5afb0c1b74ba5037edb5b6c9936a52f1e2651d5fe25dff92582c08f49614  ltk/src/modules/patcher/api/usePatcherStatusListener.ts
+493f075aad9024e155dc2640c12019cf5772979a8e4b2d48bd071fe9f8a206fa  ltk/src/modules/patcher/api/useRebuildOverlay.ts
+413e86bc5b3daed4fd2b5c963c1765a1c32644d1381600c0765a8f63de7d4b6d  ltk/src/modules/patcher/api/useRebuildOverlayAction.ts
+b2752a6e9a8ab4a42289e84350af27cce8bf75cb2305d5ebd78382e714f7dddb  ltk/src/modules/patcher/api/useStartPatcher.ts
+63983089f15ff38b6e26779d5195a70e9ccf0eb7174bbdc1b9f1748be1a9d24f  ltk/src/modules/patcher/api/useStopPatcher.ts
+867cc2868abdee450cf0a40ef09ae38f7dc9c73370478f6419592b12157af6d9  ltk/src/modules/patcher/api/useWadScanFailure.ts
+bfe9bed82fb3ac1c3b9f3aa3804051d6ee39cfa594b9f3c51c6d1cbfb9ca48ab  ltk/src/modules/patcher/components/PatcherEventListeners.tsx
+5766f588b52e3ccdc83da47293b02bbf5cf40fe4ef2ca322ca1a0c89b400a573  ltk/src/modules/patcher/components/PatcherUnsupported.tsx
+338283c36a50910e38039e422e04c7f8d39e05e3f2f015a4de789fc1d9670c37  ltk/src/modules/patcher/components/index.ts
+248741cbc6eb0137b08440bb5bfc5e3a2995d241b93410cfa37c7064757da2be  ltk/src/modules/patcher/index.ts
+026bdc6d08c9b07f6c6bba0d398d81e62dfe8f05b0ca7b0099881dc285a792dd  ltk/src/modules/patcher/utils/__tests__/scanStatus.test.ts
+5e37ce615618c1181bde404f215257ad669e76e9cc293a57621cecb13fa391df  ltk/src/modules/patcher/utils/scanStatus.ts
+d7ea6b0367b6010e46305979ed1f5d154aff4efd7187b41f63756132722c0043  ltk/src/modules/settings/__tests__/builtinMods.test.ts
+1709f82aa715d488e8ef6bf7b492042855153133fcc98daf5117357591952f4a  ltk/src/modules/settings/__tests__/settingDefaults.test.ts
+42e8158c9d638d5b44574c0caeed96eca52c8a7d6470e854e6d882b9d63ba2f0  ltk/src/modules/settings/__tests__/settingsIndex.test.ts
+6e980afc8c31ff68b438629e0605aa8b0a26f14defe0eba652411f10f13fffaa  ltk/src/modules/settings/__tests__/tabs.test.ts
+0094b255be055a8dc8553b96735451876e2596cdf287d18f3cf1dde5fb55f334  ltk/src/modules/settings/api/index.ts
+41fac6ca8c8d8fea5f9bf5ff5ff220b43f33288c27e07b1b905d6b8774502237  ltk/src/modules/settings/api/keys.ts
+0ec082ef921abd7564384a15667d0d687166bac29473b252d68a751161126f64  ltk/src/modules/settings/api/mutations.ts
+a51bd20b0630f371d64fac70241dea3ed2cbd31c9e47a9b0eb784d5613f7035b  ltk/src/modules/settings/api/queries.ts
+034eabee7f94b38bcbfa0da67c2d42671fb10dbfe72e73da66a46a9f4926966e  ltk/src/modules/settings/api/thirdPartyLicenses.ts
+88da12dc1b5a32e3b5ebcfb58012738d16b3c1ca66741e5892f0bd5a1ba4529c  ltk/src/modules/settings/api/useAppInfo.ts
+2f1d0a9fb2fe1867bf2884f1cd2ba034086a0fa544fec0a3fe336a5ff4a4ac14  ltk/src/modules/settings/api/useAutoDetectLeaguePath.ts
+c26240a52b696c7e505dd7f7a61c66dfac4b2d87c4ff9c1766350493f11c6d09  ltk/src/modules/settings/api/useAvailableWads.ts
+03c1e36019ead6b6a9dc971d14ec894632c9fde0eb7c094c9b43d5d741982350  ltk/src/modules/settings/api/useCheckSetupRequired.ts
+8d3c43013810a44297593df6782d89b89121b88898a2a38f62684359adb84fe1  ltk/src/modules/settings/api/useDetectLeagueRunAsAdmin.ts
+5eab3c34a78a4a5d785d7935a4a2d6a7d09ac6b0f54ae2cb0212e61cb75da58a  ltk/src/modules/settings/api/useForcibleMapSkins.ts
+36c69782b1e1dbcc1ac0b22331d5a192f6621aca65c6f175ed91e872053f7855  ltk/src/modules/settings/api/useHashtableCacheStatus.ts
+64e74798a9cd64a5a00d5261583855f4acbf60c185541f1764636ea8596036ab  ltk/src/modules/settings/api/useHashtableUpdateCheck.ts
+84d7ae1f1db081caa16be40257b6294543220ff2a16abac9ed9f63cb83d5f527  ltk/src/modules/settings/api/useIntegrations.ts
+6fddc7395b66060a8c732d3de4b3de59e06369d0c44c967124f5bd6dc94ec911  ltk/src/modules/settings/api/useMapDecorations.ts
+7d20deaff4e0b31750cb1b2dd68a63688063a484b5e3030359e2d88df7dd0720  ltk/src/modules/settings/api/useResetTelemetrySecret.ts
+67f493a72037ab767d8e80174c3b97b7f1a2ee44a86229cf85ebd979a21ffc76  ltk/src/modules/settings/api/useSaveSettings.ts
+b63537a89e6c70d18dea684a7bfa6e0ea80a63774183fb42d736a2de335be8fe  ltk/src/modules/settings/api/useSettingDefaults.ts
+3febb91112132783f740d8bbd43aa77f09dbc02a962f75f1824174951e2f8865  ltk/src/modules/settings/api/useSettings.ts
+53cb38e3c1592b58b0006305501e6075d55e3e083c7de2351ce62d6c5ee61f16  ltk/src/modules/settings/api/useSyncHashtables.ts
+6dcad540a38bc16035046a18b7fa15c4e96b2f0f074bccdc833d20b740982a22  ltk/src/modules/settings/api/useTelemetryIdentity.ts
+31b1270a3367712a7237c55b79c7fa4120ec6a77a472d269ae1a67ad88bda320  ltk/src/modules/settings/api/useTheme.ts
+0d31162d67072ead1eb56005a340fbdcc6a2c174d3f0e210b016dcfa927e2080  ltk/src/modules/settings/api/useThirdPartyLicenses.ts
+86a9ed9ec3b07250a4818f1193ba4403e4dbeab3571f6948b4c14158b41e6536  ltk/src/modules/settings/api/useUpdateSettings.ts
+bd941c9baf1c07ef500bdfc00f25784836b0aa0b43c780704a4487e2aca5ff76  ltk/src/modules/settings/api/useValidateLeaguePath.ts
+0ff84691b7ef59fb15d336711c26b4d83d2b0912dd46b6e25ff76eb49b8f8f05  ltk/src/modules/settings/builtinMods.ts
+a3698accf4186605017cde66e4917c8e8f1f2a0145157f53b76e7bb857c8e903  ltk/src/modules/settings/components/AboutSection.tsx
+52eb8a7199e7ec540ab4932b7bab45005c8df36235a7338f9ae74f793f05db50  ltk/src/modules/settings/components/AppearanceSection/AccentColorPicker.tsx
+0c1e5849c6722da274bd80f6a75a5f8c59aac8717b78a99db008567339d19566  ltk/src/modules/settings/components/AppearanceSection/AppearanceSection.tsx
+4a1c83a0b631d2ef3e7a429bab7a53d3cfef32ab098cd9055e06e6fb5f6e7203  ltk/src/modules/settings/components/AppearanceSection/BackdropImagePicker.tsx
+bb75887dfd5d4243a4bb6e4284389109dc50b206076872b8fd5c7a16b4bf11d5  ltk/src/modules/settings/components/AppearanceSection/CornerStylePicker.tsx
+993f86cb24624782e8ee787e6a10142512dffc7c4d77e6b61b2df8560f4c87cf  ltk/src/modules/settings/components/AppearanceSection/FontPicker.tsx
+96b8beefdb4e8ce62ab134f7a43bd15e677522c8f4a5055624d718a89119c423  ltk/src/modules/settings/components/AppearanceSection/ReduceMotionPicker.tsx
+dd2ba6da772bd6bd20e516f9faf8648d9435e168666dd7bdaf850ea137de6f23  ltk/src/modules/settings/components/AppearanceSection/ResetAppearanceButton.tsx
+669de7aa6ecf4513b91e08eadf7b6216cc80aa315675a489c02637918d7a37ab  ltk/src/modules/settings/components/AppearanceSection/ScrollModePicker.tsx
+deb70e6c1214d37d6217e26a506298634a24e344dafdd801db6ec1c26cb57cff  ltk/src/modules/settings/components/AppearanceSection/ScrollbarSizePicker.tsx
+5ce51373392fdf942ecbeae80d763464e21bfc2b488ac7f8f410ac2f3382ee10  ltk/src/modules/settings/components/AppearanceSection/SurfaceTintPicker.tsx
+f807adac9f73ac7dcbffc9ae05cedf87b8c81b867c24f26d65c887df73347c7a  ltk/src/modules/settings/components/AppearanceSection/ThemePicker.tsx
+3a97e386d8ae2a0b3d8cc1114f4185ceed5c050a978d99ed6b0840e5ebaa7472  ltk/src/modules/settings/components/AppearanceSection/ZoomLevelPicker.tsx
+73ae73902df237bb345e8925ef44fc1276631aa3d4c9f5c3acd53a2edb5a7a86  ltk/src/modules/settings/components/AppearanceSection/__tests__/ZoomLevelPicker.test.tsx
+8c4595bdcad2a6bb25705618315816c4b41ad6443fde26476d60e670d7d16260  ltk/src/modules/settings/components/AppearanceSection/index.ts
+7d44aff07916e3ae1b6832b8fe63ced5ce33115a8eaa754cad63bad3b6ec969e  ltk/src/modules/settings/components/AppearanceSection/useDebouncedSlider.ts
+6da2d80525bf7bf8029119072ddab2f00c5fadfeca7184fac6c724b8aae64bda  ltk/src/modules/settings/components/AuthorProfilesSection.tsx
+13fa8aed4b2dedafb7b5fb329ab7d28125d2a6c52d912267631123ca92f25975  ltk/src/modules/settings/components/BuiltinModsSection.tsx
+3485c8b3f3904c1dccfb727bd8a85acf0934cbb68b5cb48b05f17dd4ae1a7fb8  ltk/src/modules/settings/components/CacheSection.tsx
+5d3db289fc6a77f596aaf2234a313cd3ee1c05c4ea8809ae3edfffa0b58738f5  ltk/src/modules/settings/components/DiagnosticsNoticeDialog.tsx
+e6c3cb14760ec4e9202ae060d0d8a1ee01d561e868418b4136a3ec1d3ef00350  ltk/src/modules/settings/components/ExperimentalChip.tsx
+15cb07814bf8c3e4ffa7d1f7e93656a2a71c931ee999110125db0d3790dfc662  ltk/src/modules/settings/components/FileTypesSection.tsx
+1d28065f716cb508574a117353f3c6ca062dbce0714c4fc7c130de16ce332ac3  ltk/src/modules/settings/components/ForcedMapSkinPicker.tsx
+8e6db1084d9b4c25a291a7e8eaf9c7d2cd92163e5ce2448b8cea6e205ad69f8a  ltk/src/modules/settings/components/GeneralSection.tsx
+bdf44075e62f6efe2ec4f2fcd2ec56967c6ede892461e0404b7c4b1067b28b12  ltk/src/modules/settings/components/HotkeySection.tsx
+094c5f56ce9185422453d3204767691a8e1207f4802745dc7ebbe828c91bc868  ltk/src/modules/settings/components/IntegrationActions.tsx
+440599d33ec3ffa7714361d73808662f6d7b65a9eaee6bec8e6182520347e52c  ltk/src/modules/settings/components/IntegrationPaths.tsx
+bf16dcd72beaf80e09a01a8eb98ddade5f3299641f6e34c851d9cde04320ff44  ltk/src/modules/settings/components/IntegrationSectionCard.tsx
+4a886e3ce41da92d5830f173bb9719f7a2dcf9c7cd183db321a1b8bef184b416  ltk/src/modules/settings/components/IntegrationsSection.tsx
+bc73e4f448ed4a3f6e3a6dffa222ef327e38b08f9a5716bf8f5c2a14df589662  ltk/src/modules/settings/components/LeagueSection.tsx
+3bb0a2f395f8cd4e86699c7fbed4b1d53fa7fa784d91f03dae6cacd6cfeda9d6  ltk/src/modules/settings/components/LibrarySection.tsx
+6d52a8da0a1beae91565ca7709e019adf1e1b3f4415171d40c4fd6f4fef2d113  ltk/src/modules/settings/components/LicensesDialog.tsx
+3cffffce6f5555740292ac9271405e608e1830660a8839c8486aa4556e6bdd26  ltk/src/modules/settings/components/MapDecorationsControl.tsx
+3080fb26f70fdaba86d82d5b3a7c1b44d3c3cdbf74440c9c33ef9494614a01ce  ltk/src/modules/settings/components/MapTags.tsx
+91e3186a4a0925b9d1717422d6a36741df7f2e03d475da0a2507cf7d888f62be  ltk/src/modules/settings/components/PatchingSection.tsx
+36b0c84bcdc49bb8e733bfa5deaf5de245619558e62a0166883f490b9611687a  ltk/src/modules/settings/components/PrivacySection.tsx
+cdf1b283a3dc68703ae3c04dbc180e73075f605711cf0bd85f34b357cfd3a60d  ltk/src/modules/settings/components/ProjectEditorSection.tsx
+0a8d7ac0396a96f4a6c705c9dcfc27ad18c8e955fcb4e47763fdf5bc76be8fc2  ltk/src/modules/settings/components/SettingFocus.tsx
+e4f2d967a6f24f3ab9cda446f94485e7884d664dc7cbdd9e9d6da7e0058d973c  ltk/src/modules/settings/components/SettingGroup.tsx
+cc09f4bb98dce8c681cdda7f3c22957b75a775b8e2bb560ad7f0f042a85c3353  ltk/src/modules/settings/components/SettingGutter.tsx
+8a3832a262ef322f198394ccd2c6571378e395bbcf2172d4f70272c1891ca1c8  ltk/src/modules/settings/components/SettingRow.tsx
+595f310ea5031357bff1a4daf5ea761244535ed86762c8f3ca0173d0ec0472f8  ltk/src/modules/settings/components/SettingRows.tsx
+edf2b3e3865afd8318250a8e3bb87dd9d597c0c9bdeb26ac45a0f453a04c83a1  ltk/src/modules/settings/components/SettingScope.tsx
+96691d40dcdeb2fd9b8ad462c09407c53fe87c5b5d8abcb828ad867230edfc6e  ltk/src/modules/settings/components/SettingSwitch.tsx
+ca4c2469c9e97d6126ed02b4147d3dc88b27cd51d1e683b49c8b6eb0c4628dc9  ltk/src/modules/settings/components/SettingsGrid.tsx
+897882c606a0ed3447a1e7f6b1f0ab48c0ab042b6a4abfd0174b05322cdd2ce0  ltk/src/modules/settings/components/StartupAndTraySection.tsx
+5a6caa06335b0e206ae544d3aa7467c77d0dd7f83060ca597028bea61ae99f28  ltk/src/modules/settings/components/TrustedDomainsEditor.tsx
+234be9c359e4434529553bdbf9d6a914d29f7ab9886d21c52a565cd6c0808b9e  ltk/src/modules/settings/components/WadBlocklistEditor.tsx
+2a9d9936720238d0f3c79b0084cb5460233e54af5300a01d18497243b98d8a0f  ltk/src/modules/settings/components/WorkshopPathSection.tsx
+3fe734b6c85f62f6a39c247e9d9608faa67bf3cdba61b9e5d6037d5722d199c0  ltk/src/modules/settings/components/WorkshopSection.tsx
+96e01bac89053d499b805c1e515fd1427bcd4975daa51cf1f91f7542c96a8143  ltk/src/modules/settings/components/__tests__/BuiltinModsSection.test.tsx
+9e0dd294cbeb89369c8e4977e1c8cf53dccef4d1387243ea7280012677410d02  ltk/src/modules/settings/components/__tests__/IntegrationsSection.test.tsx
+a53892249196bfde036fa50d9fd39943f11c31e51400d233df48c7ba4a7df035  ltk/src/modules/settings/components/__tests__/LibrarySection.test.tsx
+49874490db32456853082365100e35d4adfcebe340538b5a248d952fcf1ff754  ltk/src/modules/settings/components/__tests__/SettingFocus.test.tsx
+0d891705a74c766c00ea8276aeeebd38268890c046e9c2d48711f8d39c975d02  ltk/src/modules/settings/components/__tests__/SettingGroup.test.tsx
+ec30fb4856458cded7ba94530100cea5f3eff1dfedc9987dff9b9d3c9f80e4dd  ltk/src/modules/settings/components/__tests__/SettingReset.test.tsx
+5a9f25a13c67c45f4eaa56519b6dc0ba85d59a073e7f42f3193986d42b94e579  ltk/src/modules/settings/components/__tests__/SettingRow.test.tsx
+2443a17f9a3a33aec6a284974f5d9f902e03b952a61a886bf0c3d887d560092d  ltk/src/modules/settings/components/__tests__/fixtures.tsx
+462517f1b027e366d21bd546ef79007cee1242cd37015ef5e225c58589932229  ltk/src/modules/settings/components/index.ts
+fb33886809690fb0d5e7b717ebe729ffe72ad7c443ee88af665e282ebfe03fc4  ltk/src/modules/settings/hooks/__tests__/useBlocklistView.test.ts
+4928253e63ded68e053b82a043621d080270c2e97e605323ef8a7a8cbfef43c9  ltk/src/modules/settings/hooks/__tests__/useWadBlocklist.test.ts
+91f5b961001ee5a7949e715f94907e7df102e90e36008e3c3301c6bd7bbd334b  ltk/src/modules/settings/hooks/__tests__/wadRegex.test.ts
+ffd9880e26cb20437e75bcab79e1c025474d91522a43d52497d310c3ece4b39d  ltk/src/modules/settings/hooks/index.ts
+9261f59910d5821dad88509e9791def34d97f0cac5932d640fc0845606d750e4  ltk/src/modules/settings/hooks/useBlocklistView.ts
+476d12a82d30f31bb8adc3f6248b0293201fd6cd5b18e950374325256d3fb02a  ltk/src/modules/settings/hooks/useHddWarning.ts
+7958b3d940a272dd1fb100221e8de8da964821cbd2ce56fd92a3dda40ce2470c  ltk/src/modules/settings/hooks/useRegexPreview.ts
+f2ec1a770ddd57aa2f2bb1d7310fc3f18f446c959aaef50aaf7b6bc91c3722a6  ltk/src/modules/settings/hooks/useWadAutocomplete.ts
+a7f0cac6566c452025673c4f7e412d513be2ca1627b52729f3d0e88bca3c50e0  ltk/src/modules/settings/hooks/useWadBlocklist.ts
+8cf9d1ae7b77b8701890f4a1c7d0e9cd1b565e5f2040317e047d219b14276eea  ltk/src/modules/settings/hooks/wadRegex.ts
+96c2f785d344212b34e2e0f62021c7f7519c294c86ad6b81c8f91700639a7eac  ltk/src/modules/settings/index.ts
+a22c61d4635393090419baa829ea5785a8a3e1cfb30124e213c1216097bbca8f  ltk/src/modules/settings/privacyPage.ts
+55d0b177c2216345f0b704e63cf17d2def86a49c2d1415fccc90f3f3da7c8567  ltk/src/modules/settings/settingDefaults.ts
+a58ff95a20acd10c88b43ffdcc59842ea01c896f04fce5457f3b77206f10bdbd  ltk/src/modules/settings/settingKey.ts
+5efc27a71685b73ce53c72f857c530bee2316fafcaa061f73a495f67251c84d4  ltk/src/modules/settings/settingsIndex.ts
+aaf240743d683920ba27fee8560f32101041f0a4d24de455533839ab36d4ac0b  ltk/src/modules/settings/tabs.ts
+477079dce21417cb93700bdd593abfce849381ebddc2055c5f775ee39c52bb87  ltk/src/modules/shell/components/AppMenu.tsx
+fc4b7a4839a4f133e1516d4089e86466a9777d2ffc1dc80065ebf3e4173e302e  ltk/src/modules/shell/components/DevConsole.tsx
+d40de7b5f358361d40f06312c643df0410f440d5bfb6b662f624e14620425ba7  ltk/src/modules/shell/components/DevConsoleLazy.tsx
+b3cefc25036de4d422e6c86aced0083f42680bfb365537837a0ea5c3d8d40119  ltk/src/modules/shell/components/NotificationCenter.tsx
+dc7281b046461e1fc27a59caa885347e32787d203fb999ee9e253eb4981f7b47  ltk/src/modules/shell/components/TitleBar.tsx
+e3b9b29e64d1dfe9eab7337a8cfec700ee3b6a5565fd32c49744f13839f0fac7  ltk/src/modules/shell/components/UpdateButton.tsx
+43693e300d7df721d3a824eefbd94919d0cf1946ec1456b1c85a6ceed7b48537  ltk/src/modules/shell/components/__tests__/UpdateButton.test.tsx
+549a3f7987bce07e7f63247cab43e90a2c6d348944719bef8f77a5a939405678  ltk/src/modules/shell/components/cells.ts
+4e0e866e585932a86e00b80e003efa125d8eac97de9173a9847da46ed02ae3fd  ltk/src/modules/shell/components/index.ts
+aef9d49c2541036ec55c102f05da9ba1056759a713cb88acddd1ec431bdb65c9  ltk/src/modules/shell/hooks/index.ts
+03cd858f7598c9c91b69589f244c96538865af693c54255e1ceec564298e7d6d  ltk/src/modules/shell/hooks/useDevLogStream.ts
+d5e112c35903a6693c685658b06362adbc293977124da4f25620fff3ff3118f4  ltk/src/modules/shell/index.ts
+e6a6ba3148b21b1d5b30f8db40dd9715da672c2421f649783d70386ef25142e8  ltk/src/modules/shell/state/__tests__/devConsole.test.ts
+1ae9b874e83e06e877c4b28c50e168281dbc2682ab24456790ce98fa591bf5e1  ltk/src/modules/shell/state/devConsole.ts
+86ff0e0e5d6bf0eca9b602e4bc41746a2bccd7f2c93ffaf3f89e4dd18be63620  ltk/src/modules/shell/state/index.ts
+a4120c3c143f8e40afc4fb42d5c3ac441bee4a488ade86446b7117385f93f7da  ltk/src/modules/shell/useAutoStartPatcher.ts
+ca1add4775c94a3a3033054b9391373545a058e87fa501f1efd20ba088b85eb3  ltk/src/modules/updater/api/__tests__/releaseNotes.test.ts
+dac34b5e42da1f2694c92790c61efb02c9e7ef540eaea24db4deb0eb89feabb8  ltk/src/modules/updater/api/__tests__/useReleaseHistory.test.tsx
+f3b3e2a3d3d19c6c96b51d2aa7456990a44ab68151caacc86e1661e7c0e1743a  ltk/src/modules/updater/api/client.ts
+a2228ffde4d5933961a8aefc61d0b2c25748ae9d9f543010be9e3dec330d11c6  ltk/src/modules/updater/api/discardDownload.ts
+05dbc782f5ad8a2104b2b32d0b4accc8132f5f4cf2946b1b51a63416c101648d  ltk/src/modules/updater/api/downloadUpdate.ts
+ddadc6e5b1d370742beeddd1dca3f468e0c5b472354b72784ee9dcbc3bac2fd2  ltk/src/modules/updater/api/index.ts
+be881b33c8d71fe87934e17ade6be0a1b6cc10ba97dd32aaf03c34bfc8277274  ltk/src/modules/updater/api/keys.ts
+7bd51217d9bf8dbe3d6472bec509988c3e8d9e9f888689205fa4a8e66333ed0f  ltk/src/modules/updater/api/queries.ts
+c5bdc631c50cbf90fc49d832bb9b73114608806c528c11ba035996002074aeae  ltk/src/modules/updater/api/releaseNotes.ts
+162cd25a25c2ca19eea43640374cd365dc6cef568f480b916ff097f48533675b  ltk/src/modules/updater/api/useCheckForUpdate.ts
+942efacef8ec2a3073dd762feb47fdf0a0b81a29d34dada1d7d5214b772fe8e2  ltk/src/modules/updater/api/useInstallUpdate.ts
+82872b77a617a2d4104a5fc97f088f3a984cc50d50b15e881bf203a1e6e67837  ltk/src/modules/updater/api/useReleaseHistory.ts
+f78d4d0ca6b7670ec93543551107e6c44f41bb1b0d6692b98ac679b0c90e7545  ltk/src/modules/updater/api/useSkipVersion.ts
+d81ff39bbc529daf6de798c5ff60284df868aa0abaf92e6af4790d08b18a5063  ltk/src/modules/updater/components/ChangelogContent.tsx
+17ba996471d4f07432b04b57551f6dfaeb96153be7c97390564fd1236ae7aeab  ltk/src/modules/updater/components/ReleaseHistory.tsx
+0326cb9fa51cbb2779532def060fea5fd1d69007147fa1132a53150e58055f1e  ltk/src/modules/updater/components/ReleaseSection.tsx
+5fea2c215b55db6eec87ba09e1c157c5d45c9790e9415664c169e8be76da091e  ltk/src/modules/updater/components/UpdateChangelogDialog.tsx
+4284c7a681b0eadda2ea94faa15060075c0fdf8a5863b378d21fbfaf23c04db3  ltk/src/modules/updater/components/UpdateCheckRow.tsx
+5511954309fbd689a2d7c7047de4f3e7be5c3c3728b92a96c81c95a0aada0b5e  ltk/src/modules/updater/components/UpdateNotification.tsx
+5c9c75b47f6e3d3199500fa3c096caacfb6d70eb5589790b4b382368202a2c55  ltk/src/modules/updater/components/UpdateNotificationLazy.tsx
+4050bcbdf29d00999b237b3ccc4a1311edccdc45b251d080741517439449de13  ltk/src/modules/updater/components/__tests__/UpdateChangelogDialog.test.tsx
+bfa93a783a9ebb5a90405652062dde2f0387f0a63e97dbdf1f0874e0de585b58  ltk/src/modules/updater/components/__tests__/UpdateCheckRow.test.tsx
+bcb84289a6ac18e9c88f5534bb83804aa37c7c0b6e6bd9627be56e7fffce5944  ltk/src/modules/updater/components/__tests__/UpdateNotification.test.tsx
+502c80ef1609f84b660b62a9b63beeb793c9320fd32100b6fadb038b2eaa8805  ltk/src/modules/updater/components/index.ts
+94f7ee2c1bebcd4338d220ebf6b826bcee4989fee3b1d5c323d4c2b6ad28a107  ltk/src/modules/updater/hooks/__tests__/useUpdateCheck.test.ts
+b830df67d8957b3e715186daffe19527aa3d32edd13ae77a8e5b315bf1fc7094  ltk/src/modules/updater/hooks/index.ts
+57cc92bf45d5d15efa1959f4d1bb80f59dcd632555a06ad1f217f2a77a706ccd  ltk/src/modules/updater/hooks/useUpdateCheck.ts
+ba745de094e0bfba57cfc38c99671eb91144fbc55dfb59cf3e40132a228c716c  ltk/src/modules/updater/index.ts
+41acabc7703762f58d57ca914a151433a666e1bbae679727b28d5e0cfd759562  ltk/src/modules/updater/mockUpdate.ts
+f8b5366e32309d7965a254539cb5c785851af96e23e113f28a3fd2c0fb0e41f2  ltk/src/modules/updater/types.ts
+09137415f0f368e58103627bb338deb09a407b18a52a6719ee67b46750ac7475  ltk/src/modules/viewport/README.md
+94d2215d8e53dbf071857038bc6a59c665db21d1a6d3a840f410693e56fd17cc  ltk/src/modules/viewport/animation/evaluation/__tests__/anchor.test.ts
+fd831d907b5c40e0b14a0ec0d3bc9321849d8577a38e7e570538f757dcf4216b  ltk/src/modules/viewport/animation/evaluation/__tests__/pose.test.ts
+7a5835aa148ad27e0c9f4aa2576836d0198b0b292a51c6f1bf3f9e384840970d  ltk/src/modules/viewport/animation/evaluation/anchor.ts
+11fd1685f31cc3f1057dbcc266fe09f6c4ea919c451fdad56c506c6034d9337f  ltk/src/modules/viewport/animation/evaluation/pose.ts
+0406825d46ec2820f61034443625ec54824fdd4a3cff2b48cfd5a84158e27df4  ltk/src/modules/viewport/animation/state/__tests__/clock.test.ts
+fe6b1c7bc931b7ebf7de8a395edc5e73b73b606982e4faf75d93c9d94c5ce239  ltk/src/modules/viewport/animation/state/clock.ts
+5e31b0e8ae6a947665124c65128a3e58050993124adb3369abe732d6cc36677a  ltk/src/modules/viewport/assets/api/placements.ts
+c5158586176bae3da2265feceaf4139c9f49c349841f22d1211b7b8c9001f92b  ltk/src/modules/viewport/assets/api/queries.ts
+624e2eb89c0133446a304565b4672e76bc3c51c80904e8e2a067bee858a6879f  ltk/src/modules/viewport/assets/parsing/__tests__/clipBuffer.test.ts
+71c71b07c761f2894111a76d4cca15bcac52b7056c357f2df9ed9b76acae7d07  ltk/src/modules/viewport/assets/parsing/__tests__/lightGridBuffer.test.ts
+26f5755f47388713e6dd07d523347808d2ee4e8f55491f428a3957d86243177d  ltk/src/modules/viewport/assets/parsing/__tests__/mapBuffer.test.ts
+b8042e8973dabf987e5ef6a6a39f4b99e853ada4e217da934b673557ee92691e  ltk/src/modules/viewport/assets/parsing/__tests__/meshBuffer.test.ts
+1447c7521bbf74a75892db8094a5b058144671e3d781d6ed2723a9150f20b24b  ltk/src/modules/viewport/assets/parsing/__tests__/mipBuffer.test.ts
+db11e4c6e56521c6bf9b70f673bae53f89cb0d1449fdf4c1d61fa357f47fc883  ltk/src/modules/viewport/assets/parsing/__tests__/skeletonBuffer.test.ts
+3a649d188bf6df4572669feae4e70d1478ba4f038248d6fdefd0d90116388657  ltk/src/modules/viewport/assets/parsing/clipBuffer.ts
+0ffc6e664b6e0c3c7d6d782031b12c46af7534aa636219f31b7d40657bf97115  ltk/src/modules/viewport/assets/parsing/lightGridBuffer.ts
+d974e8556431785029aa6ba03d2bec8214e99056f4cd739ad2752ca1690aad45  ltk/src/modules/viewport/assets/parsing/mapBuffer.ts
+3de6763c8941f60e333382db0d3d8541ba8d37681d2dcdc93eeba980d4a9779f  ltk/src/modules/viewport/assets/parsing/meshBuffer.ts
+e5d3c9eceff662f33f710c0fd5453576db4775fa577aa8d893c5c814197324c1  ltk/src/modules/viewport/assets/parsing/mipBuffer.ts
+d66cf5b3f105479c3cafcfa5b774a2bb89f4b36cea29d16963f6a45bc318dc20  ltk/src/modules/viewport/assets/parsing/skeletonBuffer.ts
+be8e17fefa7fdec87615b0960e90f72764c83ce4b919752272f557acd68e0b95  ltk/src/modules/viewport/assets/utils/bufferReader.ts
+cd86371e3bf42da145c1eebc82aca588e7a0dd0f97afbf8f2b9ea20dcee60e3b  ltk/src/modules/viewport/camera/components/FitCamera.tsx
+732411b6295ad1dd0ec4850e844906eead23f50ad6e76e6b56fe3c02e143920c  ltk/src/modules/viewport/camera/components/OrientationGizmo.tsx
+4b6a109e630fae129b649a2c9c23c42bb529f74e30cd6755967e672df9028b4a  ltk/src/modules/viewport/camera/components/SceneCamera.tsx
+319c08edbed6b888a425634b6472c250d54c1691d491a3e5ef9250bbf865adf4  ltk/src/modules/viewport/camera/state/__tests__/cameraMemory.test.ts
+7a10960d0749d1f7d504a8f7a20bb5f4318d61acf9d884cdb9d62d3d41d12d87  ltk/src/modules/viewport/camera/state/cameraMemory.ts
+caee540345e149856036404f43bb59bd614b26ef1b1fa2bc957eddb1a977795b  ltk/src/modules/viewport/camera/state/presetContext.ts
+15c23e864fae98d345af2a1a7565064e1a74e6af0f44a4a441252f3249f8c4ea  ltk/src/modules/viewport/camera/utils/__tests__/cameraPresets.test.ts
+b7d01b5d860d66fca0c32c348e5e5ba57e639bcfa686a5234c7d70ee2e46c179  ltk/src/modules/viewport/camera/utils/__tests__/framing.test.ts
+bd7da429050485beb1dca3398eae924f2ad0d335eb4e5984879bd79fc79b98bf  ltk/src/modules/viewport/camera/utils/cameraPresets.ts
+b52d150a681438cf5da767b6c6d150b1ac396cbfbb7aec9c7f1fde5b4061ff27  ltk/src/modules/viewport/camera/utils/framing.ts
+b43df7dc080dc9ec5c87a5586af0628db61fcc808a143d11bd7c526f13f59fac  ltk/src/modules/viewport/camera/utils/lookAt.ts
+0aebcb2a5d46bec9c444322196420b98ae36ccb389fc28cedbed23b5ccb5e10e  ltk/src/modules/viewport/character/components/Armature.tsx
+da948c8d6cf988ce014011c26189df23eb97b9013889c474bb6f21e3f31bc5cb  ltk/src/modules/viewport/character/components/Character.tsx
+32810372471061eb157a206faf98ed0c869c5d3484bbd1e2068332b2366936be  ltk/src/modules/viewport/character/hooks/useEdgeTwin.ts
+58f10a2a12993a58b6dfa4dde60abbbba2568b3d909d29ca3c943eabd8c45026  ltk/src/modules/viewport/character/state/characterSkin.ts
+43776e6375027582d0b09f15f2b5da2c54a455360e4a3a0fe652a7d6fa2e78f6  ltk/src/modules/viewport/character/utils/__tests__/armatureModel.test.ts
+4c7dd862420600dfc7ebaf10adce7f8ce0f8b8843e930385e856204199eca3b3  ltk/src/modules/viewport/character/utils/__tests__/jointTint.test.ts
+10973e3f0f40d3da643a58493344cdb7ace795d610d7e8dac0e3cc26675b0512  ltk/src/modules/viewport/character/utils/__tests__/uvScroll.test.ts
+80fedf24027d0a05914bdd5a9e9ab5f5b288da4064b604bea9e71146890afd24  ltk/src/modules/viewport/character/utils/armatureModel.ts
+a20215d581491fe048c1e5c0f07753b526bb711f0cc12cc3b5f3c74e0c20dcde  ltk/src/modules/viewport/character/utils/jointTint.ts
+beb7b1dae790341dd064b7cb8e1526aa27f70ac3eb7240fba029e8f42f17d254  ltk/src/modules/viewport/character/utils/lightGridShading.ts
+603156c10de82e4f7eb4f0e9ba31483968fb0d95bafce8011c73268d48f624ae  ltk/src/modules/viewport/character/utils/submeshBinding.ts
+609d56bf46328556f1cb2adf0c2495bcf6cc2ff2e58eb1f19bdea01343589ca0  ltk/src/modules/viewport/character/utils/uvScroll.ts
+f0ea1cbd90f7a115396284e3983a9246ef05ebd720bacc6d5508457161c64987  ltk/src/modules/viewport/hexshade/__tests__/engineEnvironment.test.ts
+ef1e28b3ddf281e1beffee08bf4e2db87f9f3be2038be9f42282a1952bef9502  ltk/src/modules/viewport/hexshade/__tests__/glowMaterial.test.ts
+0429f936c69180ae0e66c428b942d6bb25cde8c44b8d6fdcc50dc94743014277  ltk/src/modules/viewport/hexshade/__tests__/passTwin.test.ts
+8af792f83703a1c1875d99b4490cc0c4fc0b4cc053b057fa821eef2285ab860f  ltk/src/modules/viewport/hexshade/__tests__/previewMeshes.test.ts
+dcc1f0fcea7003e51a2b4ee1a06bda0118a25a4a1f604de0ce599a49e62adbc6  ltk/src/modules/viewport/hexshade/__tests__/programMaterial.test.ts
+4a10d1d1e5e93e620d8362b2f0f69a213e326aeb28e6b9b90b04b8112ea33a9a  ltk/src/modules/viewport/hexshade/__tests__/programMaterials.test.ts
+82f31f4fdcfedbf91413375f04d897a35b82e0cf76fad359e98a846480e211d9  ltk/src/modules/viewport/hexshade/__tests__/vertexPrelude.test.ts
+4a2bcb3c08bf58523353cd8bb1f19cb07f14893f9c28c3ee036d5cbe767079c1  ltk/src/modules/viewport/hexshade/blockViews.ts
+58f1ec1b97e9fd6269132c5a440afdb657c79fa305d56fbace37d988b83ebb51  ltk/src/modules/viewport/hexshade/components/MaterialSubject.tsx
+f02515aee48b479aef8737b2fd3e5a71ef59f643d5631b30c3e9631599a4533f  ltk/src/modules/viewport/hexshade/engineEnvironment.ts
+88241ce6bf6b0dbdd30840cc1a94fafee6629a0064fd6833d63899aab0aad1bb  ltk/src/modules/viewport/hexshade/glowMaterial.ts
+50a76a93ffd0e3511ed2bd830be59a3bd8007f6680f0fb731feccb4abdec4cb3  ltk/src/modules/viewport/hexshade/neutralTextures.ts
+ab326d5cf64620c15e729bff9c8e76a9ff22efbf0da95a8bf4d9e28ef55638ad  ltk/src/modules/viewport/hexshade/passTwin.ts
+b6977f1dbb7cc91ea87b92f679762d9b67e196fa16d968c9f4cc69b80ad2f5b3  ltk/src/modules/viewport/hexshade/previewMeshes.ts
+fa1b89697ddb298dc23d2919116c4bbcbd5a6703a27ac924e409101b42e64664  ltk/src/modules/viewport/hexshade/programMaterial.ts
+ccf5901389dc772a863bbfda4d102e1abadf1c38051e327f4415fa0c1521a30c  ltk/src/modules/viewport/hexshade/programMaterials.ts
+17023c71c8fd5d53269783033688efb957cd17feae6fa8cbea038c8c308e33c3  ltk/src/modules/viewport/hexshade/programTextures.ts
+f7af13c26bbfd3d412b87ad2bcf734b3fc5c3d0368c2df7ed2c4c30c630b621d  ltk/src/modules/viewport/hexshade/vertexPrelude.ts
+60b4547ebbede3aa3075108c5f17751701fce3093bff8231996d492f1ab09ea6  ltk/src/modules/viewport/index.ts
+06637b56be3a8727dddf8a997e604e74e63978867cd40fa5f21a31b9f11696ae  ltk/src/modules/viewport/scene/components/AntiAliasingPass.tsx
+8d52d7766a9678a8ed1a146544380e1dd6d92a47cb9eb903185f4fcaf03b7a1f  ltk/src/modules/viewport/scene/components/Backdrop.tsx
+8c2d15110bd86aef6e732140e12edd8489b17996c272a39b1511a6afde0311e4  ltk/src/modules/viewport/scene/components/FlatViewport.tsx
+72667977a0213301b2cabc3bfded289e93a96f6b3c790317c917b8141aeec0cd  ltk/src/modules/viewport/scene/components/HostCanvas.tsx
+4167380418ec62a609cec6b32e42774c32122afc4800ca0333e4f84b2e8f9888  ltk/src/modules/viewport/scene/components/Placement.tsx
+71c19f14f43747c3878c1852fc21e0b62f2b04ed5a4ab6d08e490f4d500d5d78  ltk/src/modules/viewport/scene/components/PostEffectsPass.tsx
+947dcf11d93d7e21cb44afbf9ed0b74536c232bc04e44d10587c7661941bbd2c  ltk/src/modules/viewport/scene/components/SharedRendererClaim.tsx
+4bfa1a1a4bc473399a5b781d50951087f5ac4ec34383279e17480dc020bce14c  ltk/src/modules/viewport/scene/components/Sky.tsx
+431b8d5e5fa5a76f44decdf73b887bbe2695d212f849c61ccf244146daf45346  ltk/src/modules/viewport/scene/components/Stage.tsx
+bc79051fc51d7fed623016a32421eeacd047ac987df3d79f379f97b62ec30521  ltk/src/modules/viewport/scene/components/Sun.tsx
+496bfce9d205488934f0df594aee605fcb782b945aec4bc0cc3d10d7b033ceca  ltk/src/modules/viewport/scene/components/Viewport.tsx
+115f6ae5209e7e9b1228ef3a534e6b16e034de4a913e9e69de6747ae2130ea19  ltk/src/modules/viewport/scene/components/__tests__/Viewport.test.tsx
+c29c83c89c0f1586322f5020c3f8d9b922f64640fbe0c0f88193f5a8801b9e7b  ltk/src/modules/viewport/scene/hooks/sceneColors.ts
+c0b72fd969830482dd9e95f83bba78638537763282fb52ca87394802b10ad6e6  ltk/src/modules/viewport/scene/hooks/useGroundTexture.ts
+2744ca017590399eaa92fc5d9df6892fd686e158e192164300a1f7bb243e1078  ltk/src/modules/viewport/scene/hooks/useMapBackdrop.ts
+3d02ffa638bb0caea123741aa5c9ceba47db7454cde6d44c1fe9f2bf1ec4d1dc  ltk/src/modules/viewport/scene/state/characterLightContext.ts
+e227d8078fd2c5ce17354488c4b1537b271260deb142c59c809df9ef4ead116a  ltk/src/modules/viewport/scene/state/viewModeContext.ts
+32ec7b712051f623e6158e6f4963b2f443a9f99f7943484268e849a4fc85dd5b  ltk/src/modules/viewport/scene/utils/__tests__/ambientOcclusion.test.ts
+9885f60b11ba4a1d4ef7cc75ac3c772770ec030e2937d1361c115baaa10d4372  ltk/src/modules/viewport/scene/utils/__tests__/fxaaMaterial.test.ts
+f348350f0be1a6bc11c218e23e6dc5f06470d9c597951cf47e05696429cc1b70  ltk/src/modules/viewport/scene/utils/__tests__/postEffects.test.ts
+48f631946df70e5b8b1788d05d795b424320676e0e30137f4547a744a1615b92  ltk/src/modules/viewport/scene/utils/__tests__/sunLight.test.ts
+bae14afcd6a23f36dddc4140b1bcee82381606133954b544c1c0d2a192ea32ce  ltk/src/modules/viewport/scene/utils/ambientOcclusion.ts
+9bcc3d208118ff0561338a93d4535beb8e9a76aaf8952d7252be1dae19b552be  ltk/src/modules/viewport/scene/utils/ambientOcclusionMaterial.ts
+d4a3435a92021874465f43d5f016c5c54bab46a6efcaa6488b5478255a3affb1  ltk/src/modules/viewport/scene/utils/antiAliasing.ts
+ae1ca4a51330822070d0b2dc977da842daeecf278696e33d1de3285f3323991c  ltk/src/modules/viewport/scene/utils/fxaaMaterial.ts
+dd4d2468aa845bf89d47b7cf485a2cd07f6ffe08289619a89f1d1141495f1423  ltk/src/modules/viewport/scene/utils/postEffects.ts
+00e68f77b1d0b23a359e126490558faf5baa2fb176baa4891d94c7d05f5cec7e  ltk/src/modules/viewport/scene/utils/postEffectsMaterial.ts
+8bebb2fd737c3e11df86eb98731b7b82635690f18993c723be22c4bf99bfb364  ltk/src/modules/viewport/scene/utils/sharedRenderer.ts
+4e6e0f78ef20304f529b3e32f9610a9a6246b92981139c4747a933d30b039f73  ltk/src/modules/viewport/scene/utils/sunLight.ts
+6276c294ba7f88539d5d07483c52f8f6a1739780202b9108f9aeb44fe24b8085  ltk/src/modules/viewport/scene/utils/viewMode.ts
+495ae011fedc9f09eaef892405c36e218f95552565045101c281d9c37b56958e  ltk/src/modules/viewport/scene/utils/world.ts
+7a596d37f14782b292b26504aae1a7814dfeef0bbfcc3780c032885e64c7d218  ltk/src/modules/viewport/shared/hooks/useAssetTextures.ts
+b93f02d7fdf008a3aca5512558d39244f00b184349c56a306dbbed66a0ded6ca  ltk/src/modules/viewport/shared/utils/__tests__/click.test.ts
+2385d0d91b4d24cb457236b658ec38b815fc230ce4ae3d48199f2f83f0f227e1  ltk/src/modules/viewport/shared/utils/__tests__/renderState.test.ts
+bc3fe952629f8506c5b3239980d792608e321f0405cbc7048007e4c410798abf  ltk/src/modules/viewport/shared/utils/__tests__/retainedCache.test.ts
+1528756a1ffdfa13eddfa14e47a2c0e0ed8cefc2180b96a52ac563366fc16d99  ltk/src/modules/viewport/shared/utils/click.ts
+6ca1d18aaa226c04bdbaf55f95f578c64474cbe92cd1a42bd82f699ef107b0a1  ltk/src/modules/viewport/shared/utils/cubeTexture.ts
+4744f053dad945cdd5b7e6b1560f01a50ec8c0b19ba51b0faaa0d5900fa8c33c  ltk/src/modules/viewport/shared/utils/renderState.ts
+9170739a2292e3d193235562f9f2a7a9bbe1329211a745549664b4575a618fb7  ltk/src/modules/viewport/shared/utils/retainedCache.ts
+76c35b474dfcd46e00146b67752597abdd72a38f9c466a28bd0c016572539ddf  ltk/src/modules/viewport/shared/utils/space.ts
+4aa7c509503800fe2f214773bb3e115dc1674ecf4845190daf872d45830d4795  ltk/src/modules/workshop/README.md
+0a819051cd8e7901e976bae011805556fae6c5a92616aca5179a63ca1c9a8b07  ltk/src/modules/workshop/api/index.ts
+1a9a20d17f4a5ccd2079b6fd391fd49bc4f2e98aff752e3da63ff1bf1135284f  ltk/src/modules/workshop/api/mutations.ts
+6270402900633f6694ec4595c6a66ff31f6518ad1f548d4a2fcd78124e8e5eb7  ltk/src/modules/workshop/api/queries.ts
+80bf00f8bf7e073df777f5c6fcc7d7050d4364d757633aee3576ed3828744fb7  ltk/src/modules/workshop/bin/README.md
+8604927cae77fc58ee67c2859d7bbd2c00f929be5b406b258ada2865f07c99fa  ltk/src/modules/workshop/bin/atlas/api/uiQueries.ts
+8b83e99fad01d2c0d25d351fa2f58c5fed726c0fd896c11b7d889fe67b84a88f  ltk/src/modules/workshop/bin/atlas/canvas/AtlasCanvas.tsx
+988687508b1d0ad10ebc20bf3008e9f0f4abb83c962d6240995b7f82239f54b6  ltk/src/modules/workshop/bin/atlas/canvas/CanvasMenu.tsx
+634c0649d0088aebf7ae291ad5b9610996045b328c7d2dcac89fa73166415853  ltk/src/modules/workshop/bin/atlas/canvas/CanvasShortcuts.tsx
+99a54a03b334f230e27d65b106bb1f340e9f16262ebb01dae5f4169695719824  ltk/src/modules/workshop/bin/atlas/canvas/CanvasStatus.tsx
+60c07659aad56306a2a4227c92cc075147dc0b08770ee1c45dc7186d23d5dfef  ltk/src/modules/workshop/bin/atlas/canvas/FrameOverlay.tsx
+c2fb94bf7e7851199f5dc87ade8149db3d63e23253a4beed67bc3a19f678237c  ltk/src/modules/workshop/bin/atlas/canvas/__tests__/canvasGeometry.test.ts
+69fbb85e7286cd23cf047d97dc5ada1ff7e88f167bc306ab308d444514f1904d  ltk/src/modules/workshop/bin/atlas/canvas/__tests__/canvasMarks.test.ts
+8e031d90a7bbc849adbcbfce8d2d58467830c0e409143612348f23e888f82748  ltk/src/modules/workshop/bin/atlas/canvas/canvasGeometry.ts
+e6d3e18599fe32c936b9928b9898824b2efc7d61173bbee57b0d4d08e4ba550a  ltk/src/modules/workshop/bin/atlas/canvas/canvasKeys.ts
+587f373a4eb265e5ca83184d3da642f6c7d47ec7d919612d5af10e804055d41e  ltk/src/modules/workshop/bin/atlas/canvas/canvasMarks.ts
+44accad8d66ae38949afd745b45d91508d6842c72eb82588b0cdbcc54755ca6e  ltk/src/modules/workshop/bin/atlas/canvas/previewKeys.ts
+299469a2520feeb75d34d50b159942a640eec9a5f499bd8f7a0f6fdee00bbd39  ltk/src/modules/workshop/bin/atlas/canvas/useButtonPlay.ts
+a21e32da7e489ad9a4a464b10a47c255f787160915d2011ecbedfa6e61174976  ltk/src/modules/workshop/bin/atlas/canvas/useCanvasEdit.ts
+0579cc92c8334aacae245830747c48670c9a68e9967e6a687f390c250ebe3935  ltk/src/modules/workshop/bin/atlas/canvas/useComboPlay.ts
+07bb9e122372fbfce8aed1bd3ae3cd40d1407a0411e151d72f97d763a0b3b1b7  ltk/src/modules/workshop/bin/atlas/canvas/useHeldKeys.ts
+32ae5ae27ee5b37aa92be72242457636b01382b69269aca8a9a7fd0c3b94c426  ltk/src/modules/workshop/bin/atlas/canvas/useMeterPlay.ts
+edddac043754a3a4229dabcc99fb281b72cc9c593faa129b66cc5b9867aa8211  ltk/src/modules/workshop/bin/atlas/canvas/useViewTransform.ts
+8f192b212fd0e9b64f2efc57d46926e0f12875f896b363ddb037cb04f22955c5  ltk/src/modules/workshop/bin/atlas/components/AnchorDiagram.tsx
+6496dc647d3d64f38bb53996076f47e46f885b80ada83758feb4d7bf2a75e541  ltk/src/modules/workshop/bin/atlas/components/AtlasEditScope.tsx
+18f6c52f016a255992a4473faa3c52b94052ec9a6576497bcba7e13a8c2abf63  ltk/src/modules/workshop/bin/atlas/components/AtlasStill.tsx
+659bccbbdb71a946d24e47203e48f4bd635a6fd05b61fc85283144f864f3d336  ltk/src/modules/workshop/bin/atlas/components/BaseElsewhereNotice.tsx
+b3ed207dd4eaf19493a8eac97db76be7b0ca982f063c8537a3afb51d7024e044  ltk/src/modules/workshop/bin/atlas/components/ButtonSection.tsx
+c88bc0c365d531423ed647de7ea34e68d2304b2f2fe5f0319b5bc14e82c7ef61  ltk/src/modules/workshop/bin/atlas/components/ButtonStateSprites.tsx
+3bfb2f375fa8b6429ddb010e98d6a39e204ceab94305772a65a07c6c12bc086d  ltk/src/modules/workshop/bin/atlas/components/CanvasToolbar.tsx
+b57a2a91a12ef69ae8b10ae4ebb258bedce504e79281d4afcfae122f2fe81888  ltk/src/modules/workshop/bin/atlas/components/ComboSection.tsx
+d5390694808ed33df75c9150cf627c2130beada34baefe842a34997003d4cc25  ltk/src/modules/workshop/bin/atlas/components/ElementEditItems.tsx
+719a4681f28864ca32b5902a02a3f6a45d9c1d454dba33c99b4d1112443fa348  ltk/src/modules/workshop/bin/atlas/components/ElementInspector.tsx
+43c1e00b2f46d0265d9eec596edd543fd782ba221b372a78442aa7a7657a0627  ltk/src/modules/workshop/bin/atlas/components/ElementMenu.tsx
+94d407b98e6df5efe4d0ad626834273ffe569ff1b71a2fbdded3336df61d3a61  ltk/src/modules/workshop/bin/atlas/components/ElementSections.tsx
+900ad59e22ba84c9c9ac9ef00e6d1b5935415ef3f6802e7c66d08806212bee20  ltk/src/modules/workshop/bin/atlas/components/FontControls.tsx
+eb69e5f61de42f99011be7e225bbf39f8e46cd79aee2a25c5436212627cde45b  ltk/src/modules/workshop/bin/atlas/components/FontPreview.tsx
+cecd0df61797025b5099a862da14630595a0beda8ebdfbe80d0a4983896a70c8  ltk/src/modules/workshop/bin/atlas/components/FontStyleFields.tsx
+8a70da111a5cb4882d728bace2336dac75ff9e3fb376d63009874b8eed8842ef  ltk/src/modules/workshop/bin/atlas/components/KeyHint.tsx
+084c8ba72677bd40f8073831bcba4f8a42c96c0f92746e1471e8c8818118a771  ltk/src/modules/workshop/bin/atlas/components/LayerRow.tsx
+f737e0c54b0e56073ee874c0d72b21949e861f5a3e868951d2d8e2c9ae6392e7  ltk/src/modules/workshop/bin/atlas/components/LayersPane.tsx
+8306be7a600a87592ff65ac461859afeb7a1ea0f26f61c4f3091d751dfb6d35a  ltk/src/modules/workshop/bin/atlas/components/MeterSection.tsx
+b8bf401bdccc12a640c94b466460a9c5db254b92a2de3f7b61b4620fce4cfcbd  ltk/src/modules/workshop/bin/atlas/components/PositionSection.tsx
+ca4f811cdeabe5ef6479f43eb6371a030ff072f1636a765b13cdcc99c72d87f4  ltk/src/modules/workshop/bin/atlas/components/ReadOnlyNote.tsx
+451a5dbaf0db28f93b9b672b2b18fd17b24f1b0407e87899186dfdb9136f16f2  ltk/src/modules/workshop/bin/atlas/components/SceneMenu.tsx
+12e8d773cfbd859c69e80c9934ce8b9f661fdee17cca639cce2267de139752e0  ltk/src/modules/workshop/bin/atlas/components/ScreenMenu.tsx
+3e8295fa1fd41972346b9cd165fbf9af7d1c2ba3961107be32a207092d136f0c  ltk/src/modules/workshop/bin/atlas/components/SpriteSection.tsx
+5aecc81e824f470478f855d95615f42d885f045f6f2598594950e32de489a535  ltk/src/modules/workshop/bin/atlas/components/SpriteThumb.tsx
+e26983b129cf999616397d220f0a8c6bd84496a179f5f40b12dc11608070d3b3  ltk/src/modules/workshop/bin/atlas/components/SpritesPane.tsx
+51207e756ddebf89032da14b1148988f140b8541d4a95cf76a8e2f919aa9f9d0  ltk/src/modules/workshop/bin/atlas/components/SurfaceField.tsx
+bc1135cf142ccbe36d7fdcd8489cd4f95247c207112ad39a6e8728e1628cfd33  ltk/src/modules/workshop/bin/atlas/components/SurfaceItems.tsx
+7965b767b9d192765a913e08e89589a47ed0d684d919132ce988dcc694d20b91  ltk/src/modules/workshop/bin/atlas/components/TextSection.tsx
+23d35b91d4c2cf6410a096dc628c4f9ccc9345b4d08a4e7d14101b1d3ce35dca  ltk/src/modules/workshop/bin/atlas/components/TooltipBar.tsx
+ccae208af71c7231f4adbeb030f59c7e496734f7c0f547ce7b060463239ad31b  ltk/src/modules/workshop/bin/atlas/components/VariantsPane.tsx
+9b0c37674ee194c28b3c6e0dc5700b43f22336c295de4be87b65e02ad6e91622  ltk/src/modules/workshop/bin/atlas/components/sectionParts.tsx
+85eba142e039d7788ecf486c2b63553bb5c587b8cc95494e73614b6d7d4092d5  ltk/src/modules/workshop/bin/atlas/engine/__tests__/anchorGaps.test.ts
+04d8fe7f3f32b8fe2323f3521d0d3e0b3aa261314a85cdb5d81053b17a498e03  ltk/src/modules/workshop/bin/atlas/engine/__tests__/board.test.ts
+8fa49541320316c4ce021a244d6ff83feaaed632ffd9de773ccaefa53a828b87  ltk/src/modules/workshop/bin/atlas/engine/__tests__/buttons.test.ts
+5faf6794c468372eda27e72e0ec625565e68b423ec0954d79aa334536fd1d39c  ltk/src/modules/workshop/bin/atlas/engine/__tests__/combo.test.ts
+4f543885e1a2f2eeec3ab427f6134310da958795e6d7d754a3be8916f3958d46  ltk/src/modules/workshop/bin/atlas/engine/__tests__/fixtures.ts
+a9dc328321be5b252ee91265046e153385a92b199285fe19aad5880537e53715  ltk/src/modules/workshop/bin/atlas/engine/__tests__/fonts.test.ts
+d09a9ec0f14981f0ead40b740363c9fc3363149a948f1c505d20c513f6d662c1  ltk/src/modules/workshop/bin/atlas/engine/__tests__/frame.sweep.test.ts
+f182528c08fc0ae5f5aa985c97b2d069970717a3db10690c8a8d149eac95da8d  ltk/src/modules/workshop/bin/atlas/engine/__tests__/layers.test.ts
+17b43d0b3ba1d46313276d8822b9f716f98232dd61ccbe73e38329d72e50e394  ltk/src/modules/workshop/bin/atlas/engine/__tests__/loadout.test.ts
+6b41e82ac35a2586726fc8dae4504ed38dd38ab48eaf351e2aee0e3e1070c595  ltk/src/modules/workshop/bin/atlas/engine/__tests__/meters.test.ts
+2b32dde0fc380e142d92fe7202cd8e98b1ff98ba9aac9af895b10724141e47ff  ltk/src/modules/workshop/bin/atlas/engine/__tests__/repeats.test.ts
+5f7139a942f1596e9541ab2012b2347a7b7d2fc6ec6f2e7c149b523daf55704d  ltk/src/modules/workshop/bin/atlas/engine/__tests__/samples.test.ts
+b851fff7ccd620a94f30925cd3e08c033ac1c4d29e81ea747ae137966a46cef7  ltk/src/modules/workshop/bin/atlas/engine/__tests__/sprites.test.ts
+fa722cbb4f3cde8256d9f85629d1d0cc00b32dbae7f2431070de925fc797506c  ltk/src/modules/workshop/bin/atlas/engine/__tests__/tooltip.test.ts
+86d151ef32fc499918dc0e657a57e21c8e8a8318c07cf8cc8ff6116b5bddcf93  ltk/src/modules/workshop/bin/atlas/engine/__tests__/variants.test.ts
+fd494b4abad5de0b7d1536ebbb76061cbce0045d6487268c70b2659ed3866b01  ltk/src/modules/workshop/bin/atlas/engine/commands/__tests__/batch.test.ts
+2f0e3bff5d533718e272a6ee04fbbef3327c664555912bc769687c6e2da3daa8  ltk/src/modules/workshop/bin/atlas/engine/commands/__tests__/build.test.ts
+97a496406f2d361513fa61a174914caa70cefcb745f2e18c5c119bb1a737db1d  ltk/src/modules/workshop/bin/atlas/engine/commands/batch.ts
+d95ccd18a20cd587f7617c249df83750fbb1e538c8985454a68f95f251a133fa  ltk/src/modules/workshop/bin/atlas/engine/commands/board.ts
+765bd895a4454f635e50180b98509343b31f44fbdaf24758491d34ef523a19aa  ltk/src/modules/workshop/bin/atlas/engine/commands/build.ts
+8939aab5f3e4183a4687eb79443170d0ebbcb5689b4bd56b49a040baa7edc957  ltk/src/modules/workshop/bin/atlas/engine/commands/hidden.ts
+3c05f480618678b43f0774c66fa82e3977906288a59690ed09b766dc00c88528  ltk/src/modules/workshop/bin/atlas/engine/commands/scissors.ts
+e91ec2df3ee38f5546410b95d2244cc60c7070723915b685d2147b652d4bf3a9  ltk/src/modules/workshop/bin/atlas/engine/commands/types.ts
+29c9457fd19f5b41c720c2f81fe659325157c2644f144052c0d308fdd3ae445a  ltk/src/modules/workshop/bin/atlas/engine/edit/__tests__/arrange.test.ts
+d7af24574f31a288a1fe98d1e4c8cb5a87c7d8220f62eaaa75c282c0468e4855  ltk/src/modules/workshop/bin/atlas/engine/edit/__tests__/edit.test.ts
+a97f512e06288c65babc90e3ef65aaf1b4e3e29dacecfd4746c4592eeafe2c21  ltk/src/modules/workshop/bin/atlas/engine/edit/anchorGaps.ts
+42c1610b86cc480cd5ff0608882b1bba81f6335cd6c0ad07d108ef8c2c7c8ee2  ltk/src/modules/workshop/bin/atlas/engine/edit/arrange.ts
+66cd326f1363597ccee9812e9284ad42b0c2aa35648382dd6782ce374904c180  ltk/src/modules/workshop/bin/atlas/engine/edit/elementEdits.ts
+cce8c0b85daf2437f92164b010086106820ceb6f9b0af8e0bf818d0aff71713a  ltk/src/modules/workshop/bin/atlas/engine/edit/fontEdits.ts
+2de568ff79a305ca753a49fa03ecaf5681c0eab5bc88befcde946cb524c1f090  ltk/src/modules/workshop/bin/atlas/engine/edit/rectEdit.ts
+2642b052ffff5811f410fa7932ccb05f3b3ff95c559a85a19334a57dcde78d64  ltk/src/modules/workshop/bin/atlas/engine/edit/snap.ts
+6f207710dd20818c17caea388b6749aeacd00c70e3c6b91c59bf9cb0432aae1f  ltk/src/modules/workshop/bin/atlas/engine/edit/spriteEdits.ts
+d15b8247097ed95fc8ae93d3076eaabd0e448d36e433120dfbe37d2249f24e4d  ltk/src/modules/workshop/bin/atlas/engine/edit/targets.ts
+162a6c2ec9d9a9b4b5b8e368d1f90c9813218f1f61cd20d89b807849e95db965  ltk/src/modules/workshop/bin/atlas/engine/effects/__tests__/effects.test.ts
+f8686876b82d8377eb739b987b4f34f976c67e87fa9348bf85cb439d245481ab  ltk/src/modules/workshop/bin/atlas/engine/effects/effects.ts
+e7fd60daf4abab2c8b3826cf26fe738df9c302b3e20f37bb52e7ccfb753f1add  ltk/src/modules/workshop/bin/atlas/engine/geometry/__tests__/quads.test.ts
+465befb3a9e90ea7b3e6bf4e690bc0e2148af9155767e3dec17f490f99867ac8  ltk/src/modules/workshop/bin/atlas/engine/geometry/quads.ts
+d408d803575d1a5be12f42f2cd6ecf14f73e236b12a52df154f9f642665ca874  ltk/src/modules/workshop/bin/atlas/engine/layout/__tests__/solve.test.ts
+f4deda05248beb96ed8e27f4791d1625d36add68136bb41309501929bc17631c  ltk/src/modules/workshop/bin/atlas/engine/layout/board.ts
+e72c4ae45129a43bbbeda94e86ba2a7a3aca92c2ccdda7c86fbb25fb022a3893  ltk/src/modules/workshop/bin/atlas/engine/layout/frames.ts
+4862a8f706a0748424f6d0b39ad74830211f18bbe74b23bc59c36af48f874d0b  ltk/src/modules/workshop/bin/atlas/engine/layout/managed.ts
+5484262a322d4b9b2e2541bc5d1c02012de4db061c5073022f90429c3edccad0  ltk/src/modules/workshop/bin/atlas/engine/layout/solve.ts
+61664edb74d7a12f22fece9750b61b3f3d603f040bfa659d68e2e53c54440339  ltk/src/modules/workshop/bin/atlas/engine/model/__tests__/visibility.test.ts
+233b3afff27b8afde4468c8c9fb10fcc71a73629382b92d5c5c606e05d787ea6  ltk/src/modules/workshop/bin/atlas/engine/model/buttons.ts
+618f9566e9f7fad676e2560528c54c3d57fd0dcd9a27e728f415ec7d7c151af0  ltk/src/modules/workshop/bin/atlas/engine/model/classNames.ts
+730487f31dbea2824a534291f0674ee9f7d970b8404660eeaa2142e8efa7e657  ltk/src/modules/workshop/bin/atlas/engine/model/combo.ts
+05eee5349d7b9ce595d276d467d6d091055ea75b2e8110230af49ea79f7ae65c  ltk/src/modules/workshop/bin/atlas/engine/model/layers.ts
+4c0bfa0de8e32f3ed395a4dd9f8d6688196074dc6f38ac9380f2bf6a31278351  ltk/src/modules/workshop/bin/atlas/engine/model/loadout.ts
+fc675d4885e69f9dd16670b575ff6753909e24ca3e71d1adb332dbd3ecab0dde  ltk/src/modules/workshop/bin/atlas/engine/model/meters.ts
+2843e6cd6cab5091c3fb3fe3a57e996493d528c0b915a4bcd498372eb856e189  ltk/src/modules/workshop/bin/atlas/engine/model/moments.ts
+e367e1919559a3749fc8d109398d622d2a1c428d7f53aacf162a9ac89e2e8ff7  ltk/src/modules/workshop/bin/atlas/engine/model/repeats.ts
+1fbf44eb66df29a2cd6dff11a59acbab50ce41001c15becfb58dbab51148da0c  ltk/src/modules/workshop/bin/atlas/engine/model/sprites.ts
+052097d8639cba0fa4fc907240727357fb5e213cde5c8818434abdfb438f1522  ltk/src/modules/workshop/bin/atlas/engine/model/tooltip.ts
+02c982b6a11da964d0b71933d6158761429c799916e5de5834248cf32ba3adf0  ltk/src/modules/workshop/bin/atlas/engine/model/tree.ts
+757c65963a8b42a010835b6422006a28fbb9048f8e8a669f7f3a7b7f6a75d06a  ltk/src/modules/workshop/bin/atlas/engine/model/variants.ts
+c6771b6c89eefccdc6da2f1e87ce2851f09120588703547fbc80e38f5cabf796  ltk/src/modules/workshop/bin/atlas/engine/model/view.ts
+238c3add2d1f636f53084f7527ffb6b1f8f6e9aee0e7b87ffa8d5bca39bafd30  ltk/src/modules/workshop/bin/atlas/engine/model/visibility.ts
+54fe72d0cd5e8a894efebb356278f102a20a0ad609a7c96219dd31053e658b04  ltk/src/modules/workshop/bin/atlas/engine/particles/__tests__/hudLayer.test.ts
+aed3788d41edfb4c5bc92bb3f0e7651feebdc9a35cd83246bee6b9e16a8058b5  ltk/src/modules/workshop/bin/atlas/engine/particles/hudLayer.ts
+8180deb1d6baf63ff8dc52ae5873117a1e9c1db3f94b540bc65ab5e0f06c2d13  ltk/src/modules/workshop/bin/atlas/engine/text/__tests__/draws.test.ts
+e4f85dd73499b6885f3229ef86995f43b76c361f5477e0e55c65e4e9bc7014c7  ltk/src/modules/workshop/bin/atlas/engine/text/__tests__/text.test.ts
+ccfe741bd80e55dcd585285a60c4ed7f04f81851675fd3fbf58019e78e0e3edc  ltk/src/modules/workshop/bin/atlas/engine/text/draws.ts
+8921bda23214078d307e35f80db0e0c287e225927eca0e937d0876f5553802e6  ltk/src/modules/workshop/bin/atlas/engine/text/layout.ts
+778ff7180a0a28784a2b0e6042e9c930e5da7f62c0a1ae23082a99590d1a6b98  ltk/src/modules/workshop/bin/atlas/engine/text/markup.ts
+b9c89632b050b518ee1dd722e4ff1f33654f31e52dacb9cc0e858126a819c1ad  ltk/src/modules/workshop/bin/atlas/engine/text/samples.ts
+2120b7e52c148337adb0f3df5def3a2631af47deaff4b409a669b3f2cd610910  ltk/src/modules/workshop/bin/atlas/engine/text/sizing.ts
+ca59659b5068c955bb192f06c7d95c420e40e234d0e7f2ba1877fceea089ce4f  ltk/src/modules/workshop/bin/atlas/engine/text/source.ts
+f2cb23eee8e5695be5514ebd589ad2dbe881222beabcd836478529eb342e3946  ltk/src/modules/workshop/bin/atlas/hooks/useAtlasLayout.ts
+2cfa679ac36b424d2237cdf0edc301461c1387bcd9a637df5e55ef1098820241  ltk/src/modules/workshop/bin/atlas/hooks/useAtlasSources.ts
+0efe6f8f766d8bb7224dcea8009f5b8ef77f15bd72ebbe43c5b230c47b0006fa  ltk/src/modules/workshop/bin/atlas/hooks/useBoard.ts
+4fd393618431cf09d73ed32e9ba619de1174d1cc21356dfb83d6ac4d696c3629  ltk/src/modules/workshop/bin/atlas/hooks/useFontFaceImport.ts
+d53ad667c1cac966b8bb7f5dc542d8b40863c0281271e1d6fbe67d6fe07e7e24  ltk/src/modules/workshop/bin/atlas/hooks/useHiddenScenes.ts
+1906012f03e79d4e1ec73a4d33ff6ed90f83fba2d3dc5c435d98554c5cd899cd  ltk/src/modules/workshop/bin/atlas/hooks/useLoadoutView.ts
+734e49458d161664757dc2d960d0c011144c7849602569de492a29fdfb33dc76  ltk/src/modules/workshop/bin/atlas/hooks/useModFolder.ts
+3e4d40a82bb9a05c6d83a0675689fdc354f40c33789cd286eb398934725e34d9  ltk/src/modules/workshop/bin/atlas/hooks/useSpriteExport.ts
+894ecdd87e3f8a685c2ab773df36b8f4f9a7f89b5e8e3bd27e2398105b4235de  ltk/src/modules/workshop/bin/atlas/hooks/useSpriteImport.ts
+799557223243a2ee0a6843e9d252ac7e97bd1c6c7fc92bb270277dc71ba7a09e  ltk/src/modules/workshop/bin/atlas/hooks/useSurfaces.ts
+4a26c48040180e27ce42e6b862d5e0aa5cd027cb494790e1a177ebba170f6b0c  ltk/src/modules/workshop/bin/atlas/hooks/useTextSource.ts
+210258b0aebfb228d5c555da027268997aa08a6174e6566dc41ed1911497d2c9  ltk/src/modules/workshop/bin/atlas/hooks/useViewMaterials.ts
+2fd7907f6bf608118240c9a2c792283dccc4f9275e067e2c763db5da6337a7c2  ltk/src/modules/workshop/bin/atlas/index.ts
+c8fc7be06178820a108c29c52eb43a41c99a0ae4e54bab575b852100b5bd01fc  ltk/src/modules/workshop/bin/atlas/rendering/components/AtlasFrame.tsx
+db5bb02dd5156c970ed0f9ae25170fbc36893ae17fdff2ddf596c367ff88c367  ltk/src/modules/workshop/bin/atlas/rendering/components/AtlasParticles.tsx
+c002dd05d48fe876aa682b71d45c602de4f0edb22023f8b70fb03539ec4a2af1  ltk/src/modules/workshop/bin/atlas/rendering/text/fontFiles.ts
+af9a085dfd8e9a483303d6c1a2728a291f45708a57817c89c20eadb43cee8e2b  ltk/src/modules/workshop/bin/atlas/rendering/text/glyphCache.ts
+0f52a951c9e8823889136a841a4185651e4045dccd01fe203f8cd41dc286ac6a  ltk/src/modules/workshop/bin/atlas/rendering/text/sfnt.ts
+d4ca982b999eb3f64d6609b5d2d37a962490df276e52d3e76f7bce0f3431a65b  ltk/src/modules/workshop/bin/atlas/rendering/utils/__tests__/renderScale.test.ts
+f6b13b938107201edb1b52a86eb5bd781d758e367e3248b25e086fe61dcac1f2  ltk/src/modules/workshop/bin/atlas/rendering/utils/buffers.ts
+1075075f71f132e8da58f4ca2e91ccd8de65a592b147959fafd8df8ab49c3d67  ltk/src/modules/workshop/bin/atlas/rendering/utils/composite.ts
+69470589a8522261b44d4b85823476c1c1fa54029bfc06953b58b763f68cde9d  ltk/src/modules/workshop/bin/atlas/rendering/utils/fontMaterials.ts
+ae65ae150e8944d41d7fa24e5115af707a18b3dca82c63fbc2e4e618d392cfd8  ltk/src/modules/workshop/bin/atlas/rendering/utils/frameRenderer.ts
+7c8ce4bff9e3aa57d7b05d0932e89cdc22820a050f5238912045255818b58139  ltk/src/modules/workshop/bin/atlas/rendering/utils/hudCamera.ts
+7668f8e6445c5a2a1b67b3205b54d1dd224c0b0e7ebaed1d286beb1db997393e  ltk/src/modules/workshop/bin/atlas/rendering/utils/renderScale.ts
+fe526163696bb9d8529f2a591255a31488f6d92f4d100e731e5d0ca664438830  ltk/src/modules/workshop/bin/atlas/rendering/utils/uiMaterials.ts
+e52bf0c91d956d91367943ce12757094495322382573a628a80778a268a5593f  ltk/src/modules/workshop/bin/atlas/state/atlasEdit.ts
+a75f09af3637df9f299c8ac17259e3ede803a3aac68765de9b0309af34ada146  ltk/src/modules/workshop/bin/atlas/state/atlasPreview.ts
+c556dd58eddbd2857ada6d927edc1659e41fb946799777fa454c7e2fea28e9fc  ltk/src/modules/workshop/bin/atlas/utils/spriteImages.ts
+748785f3b887df890c68aa03cd1ae1d70965c77dcbad0e1290416bda96f17f66  ltk/src/modules/workshop/bin/classes/components/ClassCard.tsx
+75ef49d5f47b595a2c255136274839056c3e77382c0d9246ce3eab6d5972687b  ltk/src/modules/workshop/bin/classes/components/ClassCells.tsx
+29cd406ceb11e892b85468ce88731436b79bccdf89d0deb207709c1ef53615f0  ltk/src/modules/workshop/bin/classes/components/ClassFrames.tsx
+33eeef4e3378049c3a8c807c47819fd0c715147035ad77fd9eaf48da8eee3ce4  ltk/src/modules/workshop/bin/classes/components/ClassSections.tsx
+2c0dce0e803837642f938ec5307a43a184798ac76d43ed32d3703cac63a694bd  ltk/src/modules/workshop/bin/classes/components/ClassView.tsx
+a3f68bc0f308fab9d81dce5e4510abc9e5c185c3e471859839d602a2d5b57162  ltk/src/modules/workshop/bin/classes/components/DocProse.tsx
+6cef6419082f4962bd5e8107c8eef0778673ab68c7c3e3ba4a83cfcd6a876aea  ltk/src/modules/workshop/bin/classes/components/FieldCard.tsx
+44c875bada23a6dd92d5e537d7452dab233b592d42fab5959d05f92da5d75d48  ltk/src/modules/workshop/bin/classes/components/ObjectShells.tsx
+09b3381ac5b2019aeaacbb7f9b9faed5360c38e86a016653dd6de2605f2e4ef6  ltk/src/modules/workshop/bin/classes/components/ResetMenuItem.tsx
+749753ce6264fa381e807e636adf55acb6ad0b45daed69d2a8d2111e198f1aa4  ltk/src/modules/workshop/bin/classes/components/__tests__/ClassView.atlas.test.tsx
+f23166a359cff1944839c07274b905d542630fd794e91e2f7a3fe77554c26f7c  ltk/src/modules/workshop/bin/classes/components/__tests__/ClassView.skin.test.tsx
+0add2617c190a912abb58e867401c3c630d3115b3deeee664f8e0ed50bb1defb  ltk/src/modules/workshop/bin/classes/components/__tests__/ClassView.test.tsx
+267210df17fdec3a9a11cedbf19e36afd2ba2daf2d3c2e6bff44d2ed399a9061  ltk/src/modules/workshop/bin/classes/components/__tests__/ClassView.vfx.test.tsx
+596e36fe56c5817492cbb06c769a61e611a8bd1d33b3400f4ffaf2f9d49029e7  ltk/src/modules/workshop/bin/classes/components/__tests__/SkinShell.preview.test.tsx
+967a90dd5c57bcc7969b2feda3c4a6429cceec5655e9df4ee953a5d398441c05  ltk/src/modules/workshop/bin/classes/hooks/useClassDocs.ts
+5251a91a25ca6d0803b7da2fab5bddc767ab7e67b1cc00ad83e9e77f4abc82d7  ltk/src/modules/workshop/bin/classes/hooks/useClassObjectCount.ts
+056d235390e7c9858dfa591a2ddf8b000990530cd2860056a1aeba8289c8a024  ltk/src/modules/workshop/bin/classes/hooks/useClassSchema.ts
+495e8abc553528085afefe27839dd2d10f6446bf02bd9f9c9eef22170d149ab6  ltk/src/modules/workshop/bin/classes/hooks/useInheritedLayouts.ts
+7a897751dab5a89ef8423c4376abebc5f6bdf16511eff6ab044f0c32b7e36bf3  ltk/src/modules/workshop/bin/classes/hooks/useLayoutRead.ts
+7242720ea55a59d58d4d1ec951901dc6961d0ec8ba5667cc2dc1af77de3cf798  ltk/src/modules/workshop/bin/classes/state/fieldLabels.ts
+13dfe9113260a6b2d40aac6be4bed81c4d52bf81687631b2edf0889fec0bf0ed  ltk/src/modules/workshop/bin/classes/utils/__tests__/classLayouts.test.ts
+10387190e8afe982799aa1345055272326d21123e0d31b7bc964f7a70bf9d278  ltk/src/modules/workshop/bin/classes/utils/__tests__/propertyReset.test.ts
+417dd00f78d857ac028cf665a1d15d483816165e33733803b840cee1d9276891  ltk/src/modules/workshop/bin/classes/utils/__tests__/schemaField.test.ts
+9fcb9db1ff563ba764180dba63565dddcc40b4647e044e7b6323a527b6629a11  ltk/src/modules/workshop/bin/classes/utils/classLayouts.ts
+0634b6dc27a022951011fbe85b3d6652ed766dc40dc4de99be1bfbdcf96ecafd  ltk/src/modules/workshop/bin/classes/utils/metaWiki.ts
+3f4e91f6d9e41ddd807b31130f99c32516ce8f01dd43ab7a9eeb0b164c0d1d5c  ltk/src/modules/workshop/bin/classes/utils/propertyReset.ts
+f4f87408d481e0dddd73e87682a59877cc2ecb5836f45995b4eaeb53b7f142cc  ltk/src/modules/workshop/bin/classes/utils/schemaField.ts
+29f767fed3481da7606ec3765f054ab3089f3c5f32d3bc7a54d9bd7dd650d463  ltk/src/modules/workshop/bin/curves/components/ChancePin.tsx
+8d83fb322db878eabe09c567394c1f085fdfb3adba8ce5a5d9466de8ae84c0da  ltk/src/modules/workshop/bin/curves/components/CurveGraph.tsx
+2715667cfeb08634eee2192c27a795d17e78f48aac2af24c41c91689632a5db6  ltk/src/modules/workshop/bin/curves/components/CurveKeyEditor.tsx
+78cce326f433d8dc1f5cbed56e976276500bb8968bf8ce2e22c3204aaad7742c  ltk/src/modules/workshop/bin/curves/components/CurveSurface.tsx
+433a1c830e51fccfb3479d6a4b607e4220eacb8b260d3303a35a61d189a99ab6  ltk/src/modules/workshop/bin/curves/components/CurveToolbar.tsx
+d4e426238efcf8c52037e27ed409959eef6c19c41ca93785a00e80314dc5974e  ltk/src/modules/workshop/bin/curves/components/GradientPlot.tsx
+53efb7bae892ce3965efb87e1bb5a931e77b6c30c83f67fa47f2f1a8d82e99b4  ltk/src/modules/workshop/bin/curves/components/KeyTable.tsx
+16e5431ddc8494cc75ee94b3876ad86984ac74c5905bd66f0eb988531fdf49af  ltk/src/modules/workshop/bin/curves/components/LaneHandles.tsx
+54774ae676adc09ec19bb9ffbda025b5ffd25d176de2e5486f5fa3131d9096c6  ltk/src/modules/workshop/bin/curves/components/LaneMarks.tsx
+659c8f7fb0c4f7c1639672de02ad91b4279662e5df5ddd2097052d89358b4413  ltk/src/modules/workshop/bin/curves/components/RandomFields.tsx
+aad62085646a1f02c6d28e8c8254d96d120daa087d61054c1e9e8c6bcf5c9544  ltk/src/modules/workshop/bin/curves/components/RandomKeys.tsx
+cee30a2e0f8a1ffb2fc7115fd7d4496b65b12457b7053a8aa2e1fef2126ab813  ltk/src/modules/workshop/bin/curves/components/RandomLanes.tsx
+9516197843e15232954503e9d699f848ddcbc5a858b8ec3deccc25a29e44a243  ltk/src/modules/workshop/bin/curves/components/RandomRange.tsx
+74b132d05affb1b0a8d636acb4d45d97c6a6aae69d060665ab9096478e4222b2  ltk/src/modules/workshop/bin/curves/components/Sparkline.tsx
+5e7f87088d0253fcaa6b426d2b0ce1ebdbdb221c857ef1f1b5f9156e98f78373  ltk/src/modules/workshop/bin/curves/components/__tests__/ChancePin.test.tsx
+48c58fd42a4b2df6d12280eb6cefc9346025c7aa9b74a3f8d16e812b645bb864  ltk/src/modules/workshop/bin/curves/components/__tests__/CurveGraph.test.tsx
+87ede049373cb546a86268f6de6b29036ff37bbb41fe1a471a80e0f26898bc06  ltk/src/modules/workshop/bin/curves/components/__tests__/CurveKeyEditor.test.tsx
+7cb0704cd7c45de49b07e777fb4f1edc44f80004b60a4bc9577b94ae17c827c3  ltk/src/modules/workshop/bin/curves/components/__tests__/CurveToolbar.test.tsx
+bea4d6b357271896e0aec016327f915fa1e9ad36b8c5e42a0a0160740fb2ccd8  ltk/src/modules/workshop/bin/curves/components/__tests__/KeyTable.test.tsx
+51c226d5ee58a53f66b5f71e61f54a5c09c882377095da9b53149d9b295e4d60  ltk/src/modules/workshop/bin/curves/components/__tests__/RandomLanes.test.tsx
+7a34f1bc57d3f9978a6777f09b91569da9f9f2de5701267ba005a2bbe9f726f9  ltk/src/modules/workshop/bin/curves/components/__tests__/Sparkline.test.tsx
+54cb9ed88e11c05db061abe1b056a3f50ba5b377bf10aaec9660698357af9dbc  ltk/src/modules/workshop/bin/curves/hooks/__tests__/curvePlayhead.test.ts
+f6b4c7ab4b9e51cc6fb03168b2efc057b63944795647d505aac55e5ee86b6945  ltk/src/modules/workshop/bin/curves/hooks/curvePlayhead.ts
+b877e6c6559bcb1c54fc04fc1801ea56704b0401be409faf9867661306847b20  ltk/src/modules/workshop/bin/curves/state/curveTarget.ts
+c273e06d4d4c2fac4533a9344e268caff8554bed3913b7de1a12fd9e2451ca3f  ltk/src/modules/workshop/bin/curves/state/randomEdit.ts
+d95eca5314f584accdfdde945bd03def6ca82e4958d198439719c6cf884841ef  ltk/src/modules/workshop/bin/curves/utils/__tests__/curveEdits.test.ts
+863bbde08e22a07e94456e741c9098e68140a7cbb03a45aa58645e3d43da8871  ltk/src/modules/workshop/bin/curves/utils/__tests__/curveFollow.test.ts
+5df4b4dd6c0741ba54d4fc0b5252eb235a782b986a26368151cb78bdb6c9550a  ltk/src/modules/workshop/bin/curves/utils/__tests__/curvePlot.test.ts
+af751f355980a3c42ccca7e9e488064355edc3a585b69bdba8def1a563bf8d43  ltk/src/modules/workshop/bin/curves/utils/__tests__/curveSnapping.test.ts
+b765bc2af2f16bc50b5d511d006d3bfbee1d46799afaedf5ca064561b875228b  ltk/src/modules/workshop/bin/curves/utils/__tests__/randomDraw.test.ts
+4c4711cbb9ee914f27bd6f2770f0eec72d9572d60e47316137947d3530133412  ltk/src/modules/workshop/bin/curves/utils/__tests__/randomEdits.test.ts
+b71d5366614bf4c786fa5515f93208213a4e97a437ce70f3fbdba10662b5a580  ltk/src/modules/workshop/bin/curves/utils/__tests__/randomizer.test.ts
+0ed0431211e240a8390d692d6927ab4e635c3b56968838ec4fb9983212420687  ltk/src/modules/workshop/bin/curves/utils/__tests__/rollRail.test.ts
+376edcdbe4114668b0aec07dff657f654eebffe19d766326e2d18798a4bc2e7c  ltk/src/modules/workshop/bin/curves/utils/curveChannels.ts
+86bf8975a65c1a5db3d1ae85f4170e982cd4fcea6ca89f3af42e242e33d25dab  ltk/src/modules/workshop/bin/curves/utils/curveEdits.ts
+a9ad81d83c8729356d0e8d29e1538af4ee4473b8ce8df97079a5f41891068166  ltk/src/modules/workshop/bin/curves/utils/curveFollow.ts
+0c325ad8182d34122fcd200c7b560b4436ae70499fba85ed725e36674ba9e96b  ltk/src/modules/workshop/bin/curves/utils/curvePlot.ts
+67e66610258e5a3ac63ad331e6517055d80fffc2d98accc08c5d7eabfee91ea8  ltk/src/modules/workshop/bin/curves/utils/curveSnapping.ts
+0c9311700597b0de500e1853e456a00651b811e7eb10373d1194bfb9c43eab4e  ltk/src/modules/workshop/bin/curves/utils/randomDraw.ts
+fe3d73d5bab244bb5b4f40cdc781eb0cc86912bf39502985ffe3180be60db862  ltk/src/modules/workshop/bin/curves/utils/randomEdits.ts
+b82f8250cfe83cab5a65f6787859e922dc631739063efeab29e763b6a801f7ca  ltk/src/modules/workshop/bin/curves/utils/randomText.ts
+42d0cb8bd8f8687d1877a16cc4ce2f16e783f59528ce0832bfe08020f7b021c9  ltk/src/modules/workshop/bin/curves/utils/randomizer.ts
+571fe2b62454b23081ad48310ceea9d07d5bd782057d09f88a754466e16466d7  ltk/src/modules/workshop/bin/curves/utils/rollRail.ts
+bb41c22f0a4e7f49b56b808d45a97e479d7fc35a1a7b29b52b8d17c599a3c9b0  ltk/src/modules/workshop/bin/documents/components/BinDocument.tsx
+6361f6a57409712fec3e7e0260bc209eee14b552df1a8e6d72ad68f0302a6712  ltk/src/modules/workshop/bin/documents/components/BinEditState.tsx
+ec5967118996562fe230d88e5cfdd5188877742ed4407683899ff243cb6ad5b0  ltk/src/modules/workshop/bin/documents/components/ChangeMark.tsx
+0253505afe5ba89195f87604346d87035b9c9d8906fc4663324ed7c5219fcd64  ltk/src/modules/workshop/bin/documents/components/DeclarationMenuItems.tsx
+fa33bde58f11acb2b95745da769ac7a61297aef99e7f18bd238b369408329058  ltk/src/modules/workshop/bin/documents/components/DeclarationsOffNotice.tsx
+2413f30548ef8ec242cfea2db26c8ae61ba34b26e6311f9ad1f60995f4a15363  ltk/src/modules/workshop/bin/documents/components/DeclaredChoices.tsx
+3db8ac6dee284b8aa6b2e15cd1ec93f5ecdfe6af29a8bc7456ab8840f72981eb  ltk/src/modules/workshop/bin/documents/components/DeclaredLayer.tsx
+675cb95321fa4ef381029ef0d9ba2f8ab6be81d01b85d2e2eca4e1fd9a89965e  ltk/src/modules/workshop/bin/documents/components/DeclaredModuleList.tsx
+8dff1af56c57905ec3d9309642d433ae755c3c9bfbe8fd314713cf88b27915f5  ltk/src/modules/workshop/bin/documents/components/ObjectDocument.tsx
+c2a0ab88a6316a82e055a5e3db099a847df17dd6987e314fdbe74e7c2ed2202a  ltk/src/modules/workshop/bin/documents/components/ObjectMenuItems.tsx
+a4194ba06acc1a053e9badec3f912a96d67a0962f7798ee30f56d0530fad62e2  ltk/src/modules/workshop/bin/documents/components/OverrideMark.tsx
+b0c548040efad6cafed6fbc434b020b734816e4245e525398333e68bc98c7e59  ltk/src/modules/workshop/bin/documents/components/SandboxOptions.tsx
+534caf2a03fb7520c88aaa8beef1e228adcb3be60a67a1b900cd9d178f8feb0a  ltk/src/modules/workshop/bin/documents/components/SandboxRadioItem.tsx
+f1e47b28c6628eefe0f6e8cc7507fd73435df0276ce65205436dc0f225db5430  ltk/src/modules/workshop/bin/documents/components/__tests__/DeclarationMenuItems.test.tsx
+b1fd97413ee06c66b5694d1ea1038d62ea2a490ee0a2f33906e084924da64389  ltk/src/modules/workshop/bin/documents/components/__tests__/DeclaredLayer.test.tsx
+4e252df15e1216386f94c52366a6cdc9e528c2ab5c7b26589081a4cdb2a70006  ltk/src/modules/workshop/bin/documents/components/__tests__/ObjectDocument.test.tsx
+28fa4bf5576cadb6bc6b4947d45ed05635f78acdc3cf7e4ed521392f6744a589  ltk/src/modules/workshop/bin/documents/components/__tests__/OverrideMark.test.tsx
+fbd65a6392fe58db61ab06e42bd0ef54ded885f8952136ec77b37a660c5068be  ltk/src/modules/workshop/bin/documents/components/__tests__/SandboxOptions.test.tsx
+e3362fcf1b9a94690f27d56316a042f13cba6da3a12704c430a8379e4b5bcdc3  ltk/src/modules/workshop/bin/documents/hooks/__tests__/useBinDocument.test.tsx
+04e63c0aadeeb4aae865ddbc7b4d72d9c2b3fbdcfff90486d9568735e5eb7121  ltk/src/modules/workshop/bin/documents/hooks/__tests__/useBinRead.render.test.tsx
+a9c8a46f42a1c7a1c571264dae8a52bcdf9e3901ea8bef58ad706efa12c861d9  ltk/src/modules/workshop/bin/documents/hooks/__tests__/useBinRead.test.ts
+b4e9d51a4f18b65a95fb6e02440a551a559f28945923e9a6a9fd05c9422c1aef  ltk/src/modules/workshop/bin/documents/hooks/__tests__/useChanges.test.ts
+4a4b963418a552b9a536f031b89864e151c9a3f5cf469787d68cdc1755552452  ltk/src/modules/workshop/bin/documents/hooks/useBinDocument.ts
+adb04552487b0a84b9a26252391dec30ced9207ff07f071cfab039f362fee1c7  ltk/src/modules/workshop/bin/documents/hooks/useBinRead.ts
+1d25b5ae9ed95734c9ddb4b2febfb1b540d73a74388c29b596992e34f1fd451b  ltk/src/modules/workshop/bin/documents/hooks/useBinTab.ts
+9a9fac46e04e932f0f84687d7ca25033e0942783117b187810bccabdb823189c  ltk/src/modules/workshop/bin/documents/hooks/useChanges.ts
+08d51d8148667b904d62a38585ec5a6642889c1c55f5c27c109ca7faf59ffdff  ltk/src/modules/workshop/bin/documents/hooks/useDeclared.ts
+903b4532b1158b1c84065a7032df0ec9e3d66b0c751cbb268f82aeab02fa349e  ltk/src/modules/workshop/bin/documents/hooks/useDocumentCall.ts
+f894d533a77cef8349010dd8eca8bf2ce6b0f2c019a1ffe360513c5d74f73913  ltk/src/modules/workshop/bin/documents/hooks/useOverrides.ts
+f7ead00694ccbf8dc58a52eec02f93fbafd6d17a1937b25c3fed3babbc273ed1  ltk/src/modules/workshop/bin/documents/state/__tests__/binSaves.test.ts
+3497b020e6776a1856ecbd9a5f4e5413a3fbc06451bb751521f22dbca71eb27c  ltk/src/modules/workshop/bin/documents/state/__tests__/editorFile.test.ts
+e9ad8b65f21b88b310a2f8445f856fa73de0b00e4c71f5e4a7b0755541b382b2  ltk/src/modules/workshop/bin/documents/state/binSaves.ts
+ddaaaedfe5e12d89d15be729d41d176f98db013d57d894269f3ad9818ff03e04  ltk/src/modules/workshop/bin/documents/state/changeView.ts
+981ba8427e9dec07a1e92b4a51b9d3594b179fbdff48c72570dd6ce49e1499c9  ltk/src/modules/workshop/bin/documents/state/copiedReference.ts
+b7fbf682ed2913e06348f78dcc8b7474222da8d002c12b49bd10bfdc8be7f02f  ltk/src/modules/workshop/bin/documents/state/editorFile.ts
+ba04ae0d40a7119fc536eb377c10b5b07cdc20c3ab1916e0d2f25ba8a9573237  ltk/src/modules/workshop/bin/documents/state/historyLoans.ts
+e8bcc39a489aa8c2731e1326b90f64776ea8bf7738fdd93a2d2b0411fb830f4f  ltk/src/modules/workshop/bin/documents/state/openBins.ts
+5fc24442b2f220272b2f3057022b689f9a0ca509b6a13226cf6686560ad71e08  ltk/src/modules/workshop/bin/documents/state/projectSwitch.ts
+419177b54baab649efeb45d97d0c9055d45d049618e233b06db3d1fcd049f846  ltk/src/modules/workshop/bin/documents/utils/__tests__/declarationsOn.test.ts
+2139548ecc78b3ba01c85ce8f510bbd316c6de33d09e5de20a2af1bfee95316a  ltk/src/modules/workshop/bin/documents/utils/__tests__/declaredDiagnostics.test.ts
+a679ce7c2c09a4f0253c26ac5c4c9d8dd940662bf1b271e2bfd601ee09bab87f  ltk/src/modules/workshop/bin/documents/utils/__tests__/declaredModule.test.ts
+a7712cfe8f45d56759396d7960e26d0cc47233049651fafc99b2472554d62db6  ltk/src/modules/workshop/bin/documents/utils/declarationsOn.ts
+49037a52ca085ca2ac955bec903e5525fa93def1f1296d6bb45c6224f1c4828b  ltk/src/modules/workshop/bin/documents/utils/declaredDiagnostics.ts
+8b4e153929b079755aacb87e1b887da34e068849696648d193939b704d1a21e3  ltk/src/modules/workshop/bin/documents/utils/declaredModule.ts
+6f35c4aafc7101cc350de060821094c47dcec2aa95a2d4b82388597672a06843  ltk/src/modules/workshop/bin/index.ts
+2ae0e697642b6ca8519680ff4bf848d1eee390c51df4affda9f3b5bf903986d0  ltk/src/modules/workshop/bin/links/components/DeclarationList.tsx
+e5ffc8ceea481e54e986a0dc01b7d7ada39611fd7f7220cfb38c48067ceb1b62  ltk/src/modules/workshop/bin/links/components/LinkChip.tsx
+310fb7ab12d5381ae4b0ceba727c6549b96eaa847d9402f4ba5f9f423b67b23c  ltk/src/modules/workshop/bin/links/components/OtherDeclarations.tsx
+2e0cdb309ba8abb126e2fbd7b2e9d027ca45bdff05f1423efea5c446b65752ad  ltk/src/modules/workshop/bin/links/components/TextureSwatch.tsx
+adc8eb5dad8b018b7b8b1856a33f3734f9c9caa1597b63ac21e24ba81ebd307f  ltk/src/modules/workshop/bin/links/components/__tests__/LinkChip.test.tsx
+8b8f60ebd56fb5896993599319173fa5902bc8842cceeeaac4251fc44d7b603b  ltk/src/modules/workshop/bin/links/components/__tests__/TextureSwatch.test.tsx
+c21eafaf9dc238354ed18ff92fc79a99b9cbe67ef2d3ef011cf0a1d9a3139951  ltk/src/modules/workshop/bin/links/hooks/__tests__/useLinkTargets.test.tsx
+b43ed50ae60cc6165f23b8c4f30fbf1b2b1a67a53ef72f1058c18152a7c33086  ltk/src/modules/workshop/bin/links/hooks/useLinkTargets.ts
+fa6c0b7900a23e3ec848b93cbadcd1196fdf115222f841ebfd134543c3d365bf  ltk/src/modules/workshop/bin/links/hooks/useShowInFile.ts
+50750d9f65f4f51521bf822e7417202da6d8dd451d3947d33de0977c032f52ef  ltk/src/modules/workshop/bin/links/utils/__tests__/fileLinkMark.test.ts
+cf968ceed26702c59a3069f249c37f91f591d8a24561091847ff39e1f5cc722c  ltk/src/modules/workshop/bin/links/utils/__tests__/linkDecision.test.ts
+815e3588957720afc737b49972bac50a6ac996149721343fdbe35dab979bf2d0  ltk/src/modules/workshop/bin/links/utils/fileLinkMark.ts
+f060c776c562073802f9b21f2b5dce8806d466a9389e041785fd8bbf83b170ec  ltk/src/modules/workshop/bin/links/utils/linkDecision.ts
+deb99c841fb3ba6b290196993f6b9520cc01de90e2b740dad00ad4949e5f419b  ltk/src/modules/workshop/bin/map/api/mapQueries.ts
+095d965da51b6af9bb2cfab390febd9241c77cc0921eb6c48fb37c1a266ff8dc  ltk/src/modules/workshop/bin/map/components/BackdropLayerMenu.tsx
+a852fa08645753133220ef8c01ea097b43b429582ec9688e5a9c7bc53992e280  ltk/src/modules/workshop/bin/map/components/BoxSelect.tsx
+c002b6127f27f2a46f73981aa1e1945d3fbb94826e6948a215ef13e0271b9f50  ltk/src/modules/workshop/bin/map/components/ColorRow.tsx
+2539728fdda1ccf0a6699176aa66f24088d9e38f95ed2d7f3518db4ec86d1a76  ltk/src/modules/workshop/bin/map/components/MapCharacters.tsx
+4071c4c0c1ac50e4f2c794decd3e0d8756776850f1340c0d612dc3052eb59d36  ltk/src/modules/workshop/bin/map/components/MapFileDocument.tsx
+9949b732d3bad2d517adf9f37305f3845d5d31d4b1ddcee2c9f98af658ada0ee  ltk/src/modules/workshop/bin/map/components/MapFocus.tsx
+826149cf42cfe222d4ec775a87e2d5abff51b0a105cae772da833c16481339c2  ltk/src/modules/workshop/bin/map/components/MapMarkers.tsx
+d6612126bf0f55d34b72853649aadd2cf465331bc569af808113c3f62d6575a2  ltk/src/modules/workshop/bin/map/components/MapOutliner.tsx
+72ad2ea8ff8c4d1966ff0236d018093b8fc925395ea97fb6a381850e09634b09  ltk/src/modules/workshop/bin/map/components/MapParticles.tsx
+c0bb34b6ff6ad9a72e404bb9da56dae20bbf4ee3a8681c818baee0d12adac953  ltk/src/modules/workshop/bin/map/components/MapPreview.tsx
+69c4b4a1d10c75052643c2e44828e70a98a5c169c51fb77708507ff82cc41c06  ltk/src/modules/workshop/bin/map/components/MapViewport.tsx
+2518470a493a6fa3dacd5958173a673d221d18631ddf4200b20eba15c78d749c  ltk/src/modules/workshop/bin/map/components/OutlinerRow.tsx
+4893fd83d9a1b0b8da835286f96096f679620d9a6fbf0a290ed271fa2a6ce511  ltk/src/modules/workshop/bin/map/components/OutlinerSearch.tsx
+69018f3ea63e0abce874d2d8b1836e1a296a57eaa2b405d0f270d36d0a6a093b  ltk/src/modules/workshop/bin/map/components/PlaceableInspector.tsx
+3488b401db3c708f4fc4dd7c91414a6d1f3f238433ec592ba5c4a5d94755c4df  ltk/src/modules/workshop/bin/map/components/PlaceablePicking.tsx
+e45f8f324ab6089ab6faa6d44ad4d835fa55decaac230dbe2d0e8f1c1cbb9dac  ltk/src/modules/workshop/bin/map/components/PostEffectsControl.tsx
+7908e38aa85047277836a4a6595d4a8a108d7fcb80eb60f6c73bdb2df002e429  ltk/src/modules/workshop/bin/map/components/SelectionBar.tsx
+d085f72f38f922b21215f4d322e34e151770153d7801016d5f36ca7344d74d4c  ltk/src/modules/workshop/bin/map/components/SunControl.tsx
+9380dfa816cdcff060d4067237b232020faa752e07cb25b2e0c96a9de479abe2  ltk/src/modules/workshop/bin/map/components/__tests__/MapOutliner.test.tsx
+7cde3c6971903dd6064f4ff3d820cd67c142e422b9077fdaef7e0b752dbd03b0  ltk/src/modules/workshop/bin/map/components/__tests__/PostEffectsControl.test.tsx
+f7618095fcf76a82a7094ac0fae7421fae48c1459cdba9c0f304a5de72b91473  ltk/src/modules/workshop/bin/map/hooks/useMapParticles.ts
+594e5d256d593d42af35ea2e7bb278566d5e148fbeb96603f2f9e38062a0bffb  ltk/src/modules/workshop/bin/map/state/mapScene.tsx
+a431b14697e6e28954b2d09b66a88a9d6a7f07d195cd11c9d2b988805ff11613  ltk/src/modules/workshop/bin/map/utils/__tests__/mapCharacters.test.ts
+d2c96ff0f0c4de1118e61aa003da6c3a60fe2d9898b9e4f015fbcf04caa200ca  ltk/src/modules/workshop/bin/map/utils/__tests__/mapFile.test.ts
+5b0e8de4a076db9a524d92f25c1dd42811b86a83ddb107735379915713f84cf2  ltk/src/modules/workshop/bin/map/utils/__tests__/mapOutline.test.ts
+b18e6a619b992a196250248bcdb2a133c1ca916aaf32e662cfd30034ab247c0c  ltk/src/modules/workshop/bin/map/utils/__tests__/mapParticles.test.ts
+0f4f388219620fad41c9375f26f06a26dee59c02d35550a5d874db04a72d64e7  ltk/src/modules/workshop/bin/map/utils/__tests__/mapSelection.test.ts
+f032674b2d97b7da4d2b99084645cc0d7dbb53dc73ace836c0cf595e67d1d7cf  ltk/src/modules/workshop/bin/map/utils/__tests__/mapVariants.test.ts
+f11562db423e6c4d4c1344a6708046e6651da49b143925917a08fdf80f18dcac  ltk/src/modules/workshop/bin/map/utils/mapCharacters.ts
+40ecd1a0382540e14a2b3763cbfa160aaa347482206520969c7331ff6d4deb1f  ltk/src/modules/workshop/bin/map/utils/mapFile.ts
+8cb4a99ba6845ca5d6a16cde9ffe7b59150f9c23b1b99dd40a263529706070b3  ltk/src/modules/workshop/bin/map/utils/mapOutline.ts
+2e0de860dcaecf65910745dc81360da308b660b072ceb3e384a90b28c0b7e49f  ltk/src/modules/workshop/bin/map/utils/mapParticles.ts
+04e32615be7f233b3bb0ddd49b02973e98038c1fbf5763c61dc4a2c1a20558cb  ltk/src/modules/workshop/bin/map/utils/mapSelection.ts
+67bf3dd0bd245a6671d4167c561c1190b9a5c9ebd97fdae20c0d8f319ce5e6f6  ltk/src/modules/workshop/bin/map/utils/mapVariants.ts
+7c488c55eaefddd6e1c315b2265715b9bced04604297f2eeb7326d64a30643a2  ltk/src/modules/workshop/bin/material/api/materialQueries.ts
+afd2b3820f73988d17e18b963e204b29ef2eef006544567e87b1bf03ec76f699  ltk/src/modules/workshop/bin/material/components/DeclaredRow.tsx
+066ace6f12ca80dcde6c323ed2e6b139c97c84015419263c3afb882855ae6a4a  ltk/src/modules/workshop/bin/material/components/DeclaredTable.tsx
+3dc856638a3cce592719b8c02d87991d354994da1ed1130f913272674113e4bf  ltk/src/modules/workshop/bin/material/components/LiveParam.tsx
+59378385a7a0da80ef65d981637d411a1bfc96f67ec6b27f2253c0d27adb7caf  ltk/src/modules/workshop/bin/material/components/MaterialCells.tsx
+2090af9a010c2a3d0078ace1a6beb77e627d94cfd51176f44234ac8e4bfa7fe6  ltk/src/modules/workshop/bin/material/components/MaterialMacros.tsx
+85ed1c53d4948339dee18f0d0599b979b2c534337bcae108cdc38ea7b1a8ea21  ltk/src/modules/workshop/bin/material/components/MaterialPane.tsx
+9895ddc63ededdcad92896333322d3b71ebe63f0910c8e1f06cba2fd02e31c06  ltk/src/modules/workshop/bin/material/components/MaterialPreview.tsx
+532d95bab4fea8358d82c4bc2a822a411659a6b8942599f1079520a1d6e1fe7f  ltk/src/modules/workshop/bin/material/components/MaterialTables.tsx
+fadb669fcec18d4240e883de6cb0b49d32fdda4e55c7dc23043f1987c3a1eae4  ltk/src/modules/workshop/bin/material/components/MaterialViewport.tsx
+a84473746db49e2a058c591d7f31d20df10b7553b88d1413a064cd6c180ce5e3  ltk/src/modules/workshop/bin/material/components/ProgramNotes.tsx
+023f01faac74cf312eae5658151f841791af9ac7a10e317ce7bfdf67d383bf96  ltk/src/modules/workshop/bin/material/hooks/useEntryEdits.ts
+2fd5939fab3432ac9bd11bf3d33d375475f4ef560ed4813eb5fb6f06bff9e741  ltk/src/modules/workshop/bin/material/hooks/useLinkingSkin.ts
+d00472076b4ab729cf75e9f626d161908aab372d64a8bf6488c7371ee0573ee8  ltk/src/modules/workshop/bin/material/hooks/useRowEdits.ts
+e31667e0d5c7ccaad74692dcfdedf2ed54376eb8a33265adddeb4e919331db45  ltk/src/modules/workshop/bin/material/hooks/useShaderSchema.ts
+8e217a7c6270c597d80ba500c18c7935763c0848fb2fabd6c5521ba2c9f14514  ltk/src/modules/workshop/bin/material/state/declaredTable.ts
+08ec97a46014ad21dcc551a3ec912263881fedca9c7138a970ca84ef71d62af0  ltk/src/modules/workshop/bin/material/state/heldValue.ts
+c156d8f233beda676aa32791c91346313924cbdbe828824d82e883850a4cede1  ltk/src/modules/workshop/bin/material/state/rowBaselines.ts
+9d66e493878d8ee3b65b6ba74ef14df3fc1425981535a37488bfdb0d1616a81b  ltk/src/modules/workshop/bin/material/utils/__tests__/declaredRows.test.ts
+58e47001415c151c0e510d0400b84899b20f099751188305ac3a29112a22f566  ltk/src/modules/workshop/bin/material/utils/__tests__/rowSnapshot.test.ts
+eda52495b262864df079f50fbdccd4c6504f028c5f897dc193f6fa91c0d95a13  ltk/src/modules/workshop/bin/material/utils/declaredRows.ts
+8de35a37bc9bc97748b8cc4a20656c343eb6f92984f18d04a433d578569c4896  ltk/src/modules/workshop/bin/material/utils/entryEdits.ts
+aafacd4a8f7f8d9ecca1d1d9fe4ef1a90820201a8d1b34f6de6ecef3d10a879e  ltk/src/modules/workshop/bin/material/utils/materialWarnings.ts
+1c89cc8af17f7e09a08b3b02d2366d540de55efb347507fe67ba113229e75911  ltk/src/modules/workshop/bin/material/utils/rowSnapshot.ts
+17505c058588078dba22fac21381ea3dce2cc83967d86de16b6422d93a17a6af  ltk/src/modules/workshop/bin/paths/components/PathInput.tsx
+e90b8670a8230b101116d197e66e2bb8c8a13bc262794abe5e90045046aca52f  ltk/src/modules/workshop/bin/paths/components/__tests__/PathInput.test.tsx
+6483fc9cd56602d491632db6932a27d53ddcce51c37d86e9cfdd8e8ea2c0160e  ltk/src/modules/workshop/bin/paths/hooks/usePathSuggestions.ts
+8387266432daedd765e4043b1a04332023cbc43bfed60f7b793030e0f0926cc1  ltk/src/modules/workshop/bin/paths/utils/__tests__/pathField.test.ts
+566f922e400690ce72bb1a30aff5e1a98eaf8b4341d481dba3dfc888da5d9269  ltk/src/modules/workshop/bin/paths/utils/__tests__/pathSuggestions.test.ts
+28218cc1dcb4ed518a23d817284e4feb4d5697e3b79c4f31ddb65a00e3fbf764  ltk/src/modules/workshop/bin/paths/utils/pathField.ts
+a97b78cacd6107bb49738d832ddb2213cf05835714921741232c3c7210a91d91  ltk/src/modules/workshop/bin/paths/utils/pathSuggestions.ts
+3b9766f8322591b0b1a3fe8349588e806dbd13c91cb1fae4114ee8ad87ab6124  ltk/src/modules/workshop/bin/shared/components/CutText.tsx
+b992bf14627a482c244a23af938abe724de2e2eb71df850712b1d116454ee0c6  ltk/src/modules/workshop/bin/shared/components/FoldCaret.tsx
+e200351898df8e2c42439be61428ae742140c25c4e650583e9aa28572ed21f24  ltk/src/modules/workshop/bin/shared/preview/CameraMenu.tsx
+5fe00dfd6a1cd3a4a236543df574162a6933c359f26a25df0f35d53ea07aeb0f  ltk/src/modules/workshop/bin/shared/preview/Notice.tsx
+5c37c2fc9f23841b2e8434f6eb486b6e3516bdca0229344e70302930d1bcdee4  ltk/src/modules/workshop/bin/shared/preview/PreviewPopover.tsx
+e7a9c55d29bca04523203831ba930e276e5b14977bfedaa3be60d0c996b960ba  ltk/src/modules/workshop/bin/shared/preview/PreviewToggle.tsx
+56b974b349c83cc8224353e87ea8ee58cbfc609cebbbb036498d6d8d5f65a9c9  ltk/src/modules/workshop/bin/shared/preview/PreviewViewport.tsx
+4c2285c6e8a025e14a6b4ea03d21e2f03c085245066b8d20b4be9471887437dc  ltk/src/modules/workshop/bin/shared/preview/SliderRow.tsx
+475624bd24c0d13d2d949ce2eec76fe2496ed9b6cdcfaaef13d142feedee0496  ltk/src/modules/workshop/bin/shared/preview/ViewModeMenu.tsx
+99d43f6144c9dd9e85540e9068d7a7293498ab4dd4ed099c2409795dee0c3f31  ltk/src/modules/workshop/bin/shared/preview/ViewportControls.tsx
+d5fc4b993569f59d46417c9ef5960882411c7e19bbd1072dbb560fcdb7da06ab  ltk/src/modules/workshop/bin/shared/preview/useFitRequest.ts
+b520fa4334e3d47fbf96daa7814fc625694d68b011326a7bc83edb439e6ef81c  ltk/src/modules/workshop/bin/shared/utils/__tests__/binHash.test.ts
+fb622898e35e35ff3da31f5386c4a983464a1ed23305d6c44a21fd0e72289f74  ltk/src/modules/workshop/bin/shared/utils/__tests__/textCut.test.ts
+1c514197b4f8c6730847569dfa5dc43ac81d11c56064aac52f04b91b59782a8e  ltk/src/modules/workshop/bin/shared/utils/binHash.ts
+6702af09038ac4204986e2c2f72bf0ed3e3bb8ae07aeb36a77d96e7a3767b39b  ltk/src/modules/workshop/bin/shared/utils/expectKind.ts
+876fa96630399c695146db54e633bf5366b9638d79728d666edeefbc1c50c9c9  ltk/src/modules/workshop/bin/shared/utils/textCut.ts
+f34c38bc1022a5b233f1e64acc91817759558b74426f6b9ac46584a70653b237  ltk/src/modules/workshop/bin/shell/components/ShellCrumb.tsx
+a6b88d7a1af6bd3d6c2f9698f0ccf3f94bc1e019a78dc2fe81e3c5a2c3656a93  ltk/src/modules/workshop/bin/shell/components/ShellPaneTree.tsx
+8f2bc5b0537ca5485bae8fbecf2df7319829241c0ab8b4d0101f1bb379047dab  ltk/src/modules/workshop/bin/shell/state/shellHeader.tsx
+3b033895a4e1737eacaedd34d3b264143d219670b5d21a9c1f28f395acca7530  ltk/src/modules/workshop/bin/shell/utils/__tests__/shellPanes.test.ts
+35b7be8ec57ff1cb918757a4f918793638caed21c802229025cf66bc1d70c697  ltk/src/modules/workshop/bin/shell/utils/shellPanes.ts
+a035fb85d244a163a4032cec31e33c6e97547e8a28e0eae5692070a75a9eaf28  ltk/src/modules/workshop/bin/skin/api/skinQueries.ts
+8fd7bb157fc1a6d319d35fbfa694f796d76b92445eae9c9d584cf6a0de4f337f  ltk/src/modules/workshop/bin/skin/components/BakeTangentsButton.tsx
+a0b913f2f678e04cab5ad3246bbae29d26647c9821d68fa867b4cec502980d3a  ltk/src/modules/workshop/bin/skin/components/ClipColumns.tsx
+b7ccb322d372722c1c62ac2c4e98819ac0e86f80fe34b57eb0a9f287dd58216e  ltk/src/modules/workshop/bin/skin/components/ClipContextMenu.tsx
+14dbd501ca47a1ec7079f3a94698171301a3d7c08b99a8414128027c544cd437  ltk/src/modules/workshop/bin/skin/components/ClipDetail.tsx
+20124f0bdc9d9b4d9eb7e80bc30d3bd8d1f679bc7c774ff4e48834ec1627369d  ltk/src/modules/workshop/bin/skin/components/ClipEffect.tsx
+c56bb8d8fd0a661da5c3aebaf23f171c4cefc56830331fcd6d9d9d78914fe207  ltk/src/modules/workshop/bin/skin/components/ClipMaps.tsx
+84febb185cc5aa2f09e95fe2a57d9a40914170c04c0dac04b08ef22054e870cb  ltk/src/modules/workshop/bin/skin/components/ClipTable.tsx
+503668079fde1205265f085bfefa3a5f58a967ed6b805a211c68a30c3a398da0  ltk/src/modules/workshop/bin/skin/components/ClipsSection.tsx
+26897e71318e1c662946722b526699ac710b652a20d44432f7709c6702459639  ltk/src/modules/workshop/bin/skin/components/IdleEffect.tsx
+70a535737de785439dd3ff2e3d203ecfcffa89dd0ae820e607e64717fd746527  ltk/src/modules/workshop/bin/skin/components/SkinEffectsMenu.tsx
+2c526693caea91ec3b0a6e17913431718764888640af283b028dea3aaffbb178  ltk/src/modules/workshop/bin/skin/components/SkinPreview.tsx
+4fd7db92b7ea2c49b2b1be08b7e805a6e8c01e67959b3c6ee21b54e350246c9c  ltk/src/modules/workshop/bin/skin/components/SkinSections.tsx
+e8386c2c5b30be2f7b061db1e1b9f02693755fe7dc24df0dd7f11edd985acc62  ltk/src/modules/workshop/bin/skin/components/SkinTransport.tsx
+5d7308f7120c50cb3ee43f92308be65b4c6b4b68f2f306b8b1bad9c82e5cd6f6  ltk/src/modules/workshop/bin/skin/components/SkinViewport.tsx
+7991bf1058c40b2b1b2010afb4cd7a5db15bd6ce57b6b7051d0ad0b56a880cdc  ltk/src/modules/workshop/bin/skin/components/__tests__/BakeTangentsButton.test.tsx
+c180c6c03fab2d443422cc0eae5bb0f60a46deb35a9ea0a08504cf4b33d4da89  ltk/src/modules/workshop/bin/skin/components/__tests__/ClipTable.virtual.test.tsx
+1882e592355ad74017b9edcd73fb0481b64cd5339562e3ce25faf09169694fdc  ltk/src/modules/workshop/bin/skin/components/__tests__/clipTable.test.ts
+493101f8616ff38da28268e19d95cd90693fcb3ce47c7df94e94f3aeaa9a985f  ltk/src/modules/workshop/bin/skin/hooks/useGraphSource.tsx
+ee8a241f7e40ef813fc4a31349b557ed1e32559081434819c9ba0ae0f6d8f79d  ltk/src/modules/workshop/bin/skin/hooks/useSkinKeys.ts
+6526d18c9daa40c5d4e4cd1c1964b2773f1a1f7df4c3efc4887f038af67f036a  ltk/src/modules/workshop/bin/skin/hooks/useSkinPrograms.ts
+0e57743f778721d9b1f23588e93158d30a5aa347121f59e0d89f9a1280a9d1db  ltk/src/modules/workshop/bin/skin/state/__tests__/skinChoice.test.ts
+63284e73ad828484d383aebbdfd785883f1cd4e70abc2d481339f8ca48be10b8  ltk/src/modules/workshop/bin/skin/state/skinChoice.ts
+e0ec1f406ea36a900160cca6b6dbb0111c6f1662fd0669ca0baa80dfb9083404  ltk/src/modules/workshop/bin/skin/utils/__tests__/clipEvents.test.ts
+023c9616ba0a926c7e276a0c9c731a6f01059865c8d253bf4fb20d65d4be9635  ltk/src/modules/workshop/bin/skin/utils/__tests__/defaultProgram.test.ts
+d621b755df6fcfa28f978fd78e28e1aa0c6d7b6156c0a0e1f987003e5a04f008  ltk/src/modules/workshop/bin/skin/utils/__tests__/follow.test.ts
+f47e367ae30a9a6b12a36358984aa452cd2ddf258de6c06c119ed11b9a50febe  ltk/src/modules/workshop/bin/skin/utils/__tests__/skinPrograms.test.ts
+e0444075edabbc76c311cd7b96e1bdca9447f7d30204775e0aee17fcbceced29  ltk/src/modules/workshop/bin/skin/utils/__tests__/skinScene.test.ts
+283bbfb160914938910672e66c9a72e90d1e44973c371ef60a11c8af7bbfe0d0  ltk/src/modules/workshop/bin/skin/utils/clipEvents.ts
+ca1790d8b757f090a8eb4ac6d30f949d58e82918071140e4da5caac90cd20fbf  ltk/src/modules/workshop/bin/skin/utils/defaultProgram.ts
+2511896cd1e3bbe973ea18714a0d2dbb3f359d27d03cd9aa7d266319b729da42  ltk/src/modules/workshop/bin/skin/utils/follow.ts
+6a0ff5207fa868912bc3705fb10ae0f408add528418cdd0ff3e997c86be37cfc  ltk/src/modules/workshop/bin/skin/utils/skinScene.ts
+b2304f477d84c5dbd0b83e35c499fb4ff2d6d928acf69657e3e012d83a80c418  ltk/src/modules/workshop/bin/spells/api/abilityQueries.ts
+2909c857b83304d2ae91a4ebd14d80a8b94dd631e53e6bc3d4a0dced92bf0c4e  ltk/src/modules/workshop/bin/spells/api/spellQueries.ts
+73617b5be7825f637b25320e4974c970c6fb8ba9a047a9636412b1761704330b  ltk/src/modules/workshop/bin/spells/components/AbilityGuides.tsx
+63a589c6e2ae6502ac9d692eddd136b7b74bc638ab347bdbb9ca767872ac1857  ltk/src/modules/workshop/bin/spells/components/AbilityLibrary.tsx
+f66e0ac46361161c1ba53c2a9ae9b24f875ac5128aea52b6e68df9de3f09ffe5  ltk/src/modules/workshop/bin/spells/components/AbilityPreview.tsx
+1987e66c8de718fa5f2a1f1300bce0167e912858826401e3883f3504e5b338d0  ltk/src/modules/workshop/bin/spells/components/AbilityScene.tsx
+156f07eb802932ce02b9e2779e34366b3c4afb3a4f6a6dca88e35744c74c09b9  ltk/src/modules/workshop/bin/spells/components/MissileOptions.tsx
+f895a4f57ccc1f3841da1ce54352b705bf27c1db2345772272c4579d08176db9  ltk/src/modules/workshop/bin/spells/components/MissilePane.tsx
+f57349ecb1720e0511179a41ce2bc6d1a3b2cb96f9553ffad9f29c18f2b86755  ltk/src/modules/workshop/bin/spells/components/MissileViewport.tsx
+8c15bdaa07fac9e1316dba5be68c02feea1646d3a4db3a75172b2800e3082d7c  ltk/src/modules/workshop/bin/spells/components/RecipeFields.tsx
+ae4f407c4f87b9b25e1e8b8f35572038a4da62066201d831caeb5ade96f6bf29  ltk/src/modules/workshop/bin/spells/components/SpellRecipe.tsx
+964501f1f6e2650b478bc426d77b7fc39b166ef8ed6350590497ad5d69ab3aac  ltk/src/modules/workshop/bin/spells/components/SpellsPane.tsx
+7054eb94e745f83d6b19ab118d596a17fd973fbfe8df398aeaed9cfc8a98f21a  ltk/src/modules/workshop/bin/spells/components/__tests__/MissilePane.test.tsx
+34ba90ff842c1df00924a6a0597283ffdb57454f6370a98bbd14664a3d167931  ltk/src/modules/workshop/bin/spells/components/__tests__/SpellRecipe.test.tsx
+96a20cf5e81f7c7cf0e7c4bf306eba8dad61390ea9af4d922fe12286e7435935  ltk/src/modules/workshop/bin/spells/components/__tests__/SpellsPane.test.tsx
+a11c12859752c2d0a7e0b23b5179f6462d3f044f67ecf6a9ae854a2f30319e2f  ltk/src/modules/workshop/bin/spells/utils/__tests__/abilitySequence.test.ts
+84be979fc76ee070543ae4af0b87e01afeeb9acf6520e01441c7c0d1bc1581ac  ltk/src/modules/workshop/bin/spells/utils/__tests__/catalog.test.ts
+c3024f67db19506dc980c68d51dfd72cd8ba16042a6aaec84ba9099a7a78a1e5  ltk/src/modules/workshop/bin/spells/utils/__tests__/flight.test.ts
+4baf4b00d02d699e8c88b5709ee7c655e8284818eb23c399ecfda69b8f9251be  ltk/src/modules/workshop/bin/spells/utils/__tests__/spellAnimation.test.ts
+a38cf7cd1fe6b46b9da2c3424fda099f142a60b1e9e086079347c5084dac5758  ltk/src/modules/workshop/bin/spells/utils/__tests__/spellSuggestions.test.ts
+00271fb1c8641e4a3dad6d30847aaba1c16a2249caa4335137a539b22bca8a9f  ltk/src/modules/workshop/bin/spells/utils/abilityRecipe.ts
+406685408128ddc1c34084e60ea3b64cb0890ed74e72f7b3d8d58322d80a77a1  ltk/src/modules/workshop/bin/spells/utils/abilitySequence.ts
+eef799fdd77868d374fb77e5cb3e82c261dd649691e9bb56db5ca6c6f687af3f  ltk/src/modules/workshop/bin/spells/utils/catalog.ts
+86d559f003efe7bd7fbe1e8b24bb5f3a88059d191e11fbfd6db50209d4b73291  ltk/src/modules/workshop/bin/spells/utils/flight.ts
+1fbfcea794b59493601c34b8fd4f5ecb8221b00546511c05444c0a5f6afbbc2a  ltk/src/modules/workshop/bin/spells/utils/guideLines.ts
+e36a23d210b41531958755876bba030407f9c63d7f8cf20b3bed1e904ae15a53  ltk/src/modules/workshop/bin/spells/utils/spellAnimation.ts
+c45f928097bbeeedd899fd48b1ed507d6a084f7b01f255bae5aa052af1f6ecf7  ltk/src/modules/workshop/bin/spells/utils/spellSuggestions.ts
+5cbddaea399db7d30dc4a5813d3ed841d10f9eefc021189fdefaf04a1c444903  ltk/src/modules/workshop/bin/tree/components/AddItemLine.tsx
+c8d2b168940a520c7210995869e73446ede0112b0e983a6e25afeedb6238eb20  ltk/src/modules/workshop/bin/tree/components/AddLineFrame.tsx
+24e04ccb4c9d9a018ce2e3d4fef3bff2189c6cce5d7ded8e2c4bdc679ceb942a  ltk/src/modules/workshop/bin/tree/components/AddPropertyLine.tsx
+bf50c5afd204116af79f287741849d005410079048a6a8a4744aa8d5868216f1  ltk/src/modules/workshop/bin/tree/components/BinContextMenu.tsx
+129eaa1863588ca4fb51fa61ef71bada796816269540cc88a2d57926718f0878  ltk/src/modules/workshop/bin/tree/components/BinRow.tsx
+d48d99f5232c66e14a354b9ac4f11c8d9038cb08c6a4b905ece6a3598fc30555  ltk/src/modules/workshop/bin/tree/components/BinTree.tsx
+3275fb1e61429771e724557fa55b95a4ecdd8e950d8281913e05d4b760eec827  ltk/src/modules/workshop/bin/tree/components/DependencyMenu.tsx
+6a58a1f9fc520aab6cbcce44a7eb3e1165b819fbb09d605c86734b5d99e38b5c  ltk/src/modules/workshop/bin/tree/components/DependencyRows.tsx
+5bcb09546d0814bbb848cc60f6fff492aa8093a8f8038f5f92e5f11aee98d557  ltk/src/modules/workshop/bin/tree/components/NewObjectLine.tsx
+ceba93422f0969b1715b6ca049f2446d8b354a167ae494703610b077ffe8ad2b  ltk/src/modules/workshop/bin/tree/components/TreeContexts.tsx
+6457525e1f67973cb11ef0544e30a4853581ee1e0b810b161c567d210db69ce0  ltk/src/modules/workshop/bin/tree/components/__tests__/BinRow.edit.test.tsx
+56b449ff1dc4d02b7e0ad276e047cd562d0578077968017d3839706f0e6d8f5e  ltk/src/modules/workshop/bin/tree/components/__tests__/BinRow.items.test.tsx
+ef8ae50668355030211f4ebca72e8687752f58d94e8cd6ca64de45da2528d370  ltk/src/modules/workshop/bin/tree/components/__tests__/BinRow.patch.test.tsx
+52141c186556e9d32591112bd7047a1a92c21fc40abf08d09ea0576fd202fa93  ltk/src/modules/workshop/bin/tree/components/__tests__/BinRow.test.tsx
+b9ae459d739c233e2c4dfb54d6d9f8db6f96dae8ce004055d13548340526fb13  ltk/src/modules/workshop/bin/tree/components/__tests__/DependencyRows.test.tsx
+0823fbd34753be6321a982ec5439b05192a6dc793685fbba5e48e59744b16f71  ltk/src/modules/workshop/bin/tree/components/__tests__/ObjectEdits.test.tsx
+bab66bfc3151a1886e48a6b71fdbb786bb29ae5d282c7830f1e6208fcca09687  ltk/src/modules/workshop/bin/tree/componenonst auto owner{ minion->getGoldRedirectTarget() }; owner) {
 			if (hash == FNV("JammerDevice") || hash == FNV("SightWard") || hash == FNV("YellowTrinket") || hash == FNV("VisionWard") || hash == FNV("BlueTrinket") || hash == FNV("TestCubeRender10Vision")) {
 				if (!player || owner == player) {
 					if (hash == FNV("TestCubeRender10Vision") && playerHash == FNV("Yone"))

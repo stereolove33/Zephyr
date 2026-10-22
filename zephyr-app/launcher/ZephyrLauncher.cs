@@ -7,8 +7,8 @@ using System.Windows.Forms;
 using System.Reflection;
 [assembly: AssemblyTitle("Zephyr")]
 [assembly: AssemblyProduct("Zephyr")]
-[assembly: AssemblyFileVersion("1.0.2.0")]
-[assembly: AssemblyVersion("1.0.2.0")]
+[assembly: AssemblyFileVersion("1.0.3.0")]
+[assembly: AssemblyVersion("1.0.3.0")]
 internal static class ZephyrLauncher
 {
     static string Hash(string file)
@@ -36,7 +36,7 @@ internal static class ZephyrLauncher
             if (Hash(injector) != "e49ce3ab78ca0e04a7a8a3b9d69091b0deadd03a25ce218c605863aeaf40b7ff") throw new IOException("The original application failed its integrity check.");
             bool original = args.Contains("--original-menu");
             string game = Path.Combine(root, "resources", original ? "originals" : "customized", "R3nzSkin.dll");
-            string expected = original ? "af04b42974bb152dc712d01f137e7f82feca20fbb2d650ee1d8ad7be0f412d6e" : "af35494426172801f396ee8ecfeb1c20fe8c6954e2a8c56fdb1854c4c626e030";
+            string expected = original ? "af04b42974bb152dc712d01f137e7f82feca20fbb2d650ee1d8ad7be0f412d6e" : "353f56b5adb671f9350cb01fbb7a676bd653750f8790d4373bcba2b05228832f";
             if (Hash(game) != expected) throw new IOException("The menu failed its integrity check.");
 
             CopyIfChanged(injector, Path.Combine(runtime, "Zephyr.exe"));

@@ -30,7 +30,9 @@ internal static class UpdateCheckerTests
     {
         Expect(Release("1.0.0"), "current");
         Expect(Release("1.0.1"), "current");
-        Expect(Release("1.0.2"), "available");
+        Expect(Release(UpdateChecker.CurrentVersion), "current");
+        var current = new Version(UpdateChecker.CurrentVersion);
+        Expect(Release(new Version(current.Major, current.Minor, current.Build + 1).ToString()), "available");
         Expect(Release("1.0.10"), "available");
         Expect(Release("1.10.0"), "available");
         Expect(Release("2.0.0"), "available");

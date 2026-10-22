@@ -149,7 +149,7 @@ namespace SkinFusion
     {
         public bool autoRun { get; set; }
         public bool minimizeToTray { get; set; }
-        internal UiPreferences() { minimizeToTray = true; }
+        public UiPreferences() { minimizeToTray = true; }
     }
 
     internal sealed class EmbeddedPanel : Panel
@@ -212,6 +212,9 @@ namespace SkinFusion
             form.MaximumSize = Size.Empty;
             form.MinimumSize = new Size(440, 640);
             form.FormBorderStyle = FormBorderStyle.Sizable;
+            // Reapply shell properties whenever Windows recreates the native window.
+            form.HandleCreated += delegate { TaskbarBranding.Apply(form); };
+            TaskbarBranding.Apply(form);
             Rectangle available = Screen.FromControl(form).WorkingArea;
             form.ClientSize = new Size(480, Math.Min(710, Math.Max(560, available.Height - 90)));
             form.Location = new Point(

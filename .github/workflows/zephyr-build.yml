@@ -1,5 +1,5 @@
 name: Zephyr Build
-run-name: Zephyr 1.0.2
+run-name: Zephyr 1.0.3
 
 on:
   workflow_dispatch:

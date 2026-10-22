@@ -3,7 +3,7 @@ run-name: ${{ github.event.head_commit.message || 'Zephyr' }}
 
 on:
   push:
-    branches: [main]
+    branches: [main, zephyr-1.0.3]
     paths:
       - .github/workflows/publish-portable.yml
       - zephyr-app/release-manifest.json
